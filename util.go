@@ -4,6 +4,8 @@ import "strings"
 
 func IsMatch(input, suggest string) bool {
 	index := 0
+	input = strings.ToLower(input)
+	suggest = strings.ToLower(suggest)
 
 	for _, c := range input {
 		if c == '-' {

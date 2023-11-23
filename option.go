@@ -1,10 +1,12 @@
 package prompt
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -77,6 +79,13 @@ func WithOutFile(outFile string) PromptModelOption {
 	}
 }
 
+// WithFilterAscii filter invisible characters in ascii
+func WithFilterAscii() PromptModelOption {
+	return func(pm *PromptModel) {
+		pm.filterAscii = true
+	}
+}
+
 func redirectStdout(m *PromptModel) error {
 	outputFile, err := os.OpenFile(m.outFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
@@ -104,8 +113,11 @@ func redirectStdout(m *PromptModel) error {
 
 	go func() {
 		defer outputFile.Close()
-		for {
-			outputFile.Write(<-outFileChan)
+		for buffer := range outFileChan {
+			if m.filterAscii {
+				buffer = filterAscii(buffer)
+			}
+			outputFile.Write(buffer)
 		}
 	}()
 
@@ -122,14 +134,21 @@ func redirectStdout(m *PromptModel) error {
 				time.Sleep(time.Millisecond)
 				continue
 			}
-			go func() {
-				consoleChan <- buffer
-				outFileChan <- buffer
-			}()
+			consoleChan <- buffer
+			outFileChan <- buffer
 		}
 
 	}()
 	return nil
+}
+
+func filterAscii(buffer []byte) []byte {
+	return bytes.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || r == '\r' || r == '\b' || unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, buffer)
 }
 
 // -----------------------------------------------------------------------------------------------------------------

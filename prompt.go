@@ -42,7 +42,8 @@ type PromptModel struct {
 	runCmdMark  bool
 	runCmdDeply int64 // ms
 
-	outFile string
+	outFile     string
+	filterAscii bool // filter invisible characters in ascii
 
 	mutex sync.Mutex
 }

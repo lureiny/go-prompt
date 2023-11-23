@@ -61,7 +61,7 @@ func (h *HandlerInfo) InitParamsAndFlagSet() error {
 				h.Name, i, v.String())
 		}
 		if err := initIterfaceParams(&h.Suggests[i], v, h); err != nil {
-			return err
+			return fmt.Errorf("init handler[%s] the %d in param fail, err: %v", h.Name, i, err)
 		}
 	}
 	return nil
