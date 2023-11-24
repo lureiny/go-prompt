@@ -100,6 +100,7 @@ func redirectStdout(m *PromptModel) error {
 		panic(err)
 	}
 	os.Stdout = writer
+	os.Stderr = writer
 
 	consoleChan := make(chan []byte)
 	outFileChan := make(chan []byte)
