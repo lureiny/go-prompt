@@ -47,6 +47,8 @@ type PromptModel struct {
 	outFile     string
 	filterAscii bool // filter invisible characters in ascii
 
+	exit bool
+
 	mutex sync.Mutex
 }
 
@@ -165,6 +167,7 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch keypress := msg.String(); keypress {
 		case "ctrl+d":
+			m.exit = true
 			return m, tea.Quit
 		case "ctrl+c":
 			m.historyBuffers[m.historyIndex] = ""
@@ -251,7 +254,7 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *PromptModel) View() string {
-	if m.runCmdMark {
+	if m.runCmdMark || m.exit {
 		return m.prefix
 	}
 	m.updateSuggentList()
