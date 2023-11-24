@@ -60,6 +60,18 @@ func WithForceStyle(style lipgloss.Style) PromptModelOption {
 	}
 }
 
+func WithBaseStyle(style lipgloss.Style) PromptModelOption {
+	return func(pm *PromptModel) {
+		pm.baseStyle = style
+	}
+}
+
+func WithIgnoreEmptyCmd(ignore bool) PromptModelOption {
+	return func(pm *PromptModel) {
+		pm.ignoreEmptyCmd = ignore
+	}
+}
+
 func WithDefaultHandlerCallback(callback HandlerCallback) PromptModelOption {
 	return func(pm *PromptModel) {
 		pm.defaultCallback = callback

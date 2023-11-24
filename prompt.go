@@ -24,7 +24,8 @@ type PromptModel struct {
 	historyBufferPos int
 	// historyOuts    []string // save history out info
 
-	printCmd bool
+	printCmd       bool
+	ignoreEmptyCmd bool
 
 	textInput textinput.Model
 
@@ -38,6 +39,7 @@ type PromptModel struct {
 	initFuncs []PromptModelInitFunc
 
 	forceStyle lipgloss.Style
+	baseStyle  lipgloss.Style
 
 	runCmdMark  bool
 	runCmdDeply int64 // ms
@@ -67,6 +69,7 @@ func NewPromptModel(opts ...PromptModelOption) *PromptModel {
 		suggestIndex:   -1,
 		suggestNum:     defaultSuggestNum,
 		forceStyle:     defaultForceStyle,
+		baseStyle:      defaultBaseStyle,
 
 		runCmdDeply: defaultRunCmdDeply,
 		printCmd:    defaultPrintCmd,
@@ -272,9 +275,13 @@ func (m *PromptModel) SuggestView() string {
 		suggestViews = append(suggestViews, suggestView)
 		width = max(len(suggestView), width)
 	}
+	m.forceStyle = m.forceStyle.Width(width)
+	m.baseStyle = m.baseStyle.Width(width)
 	for index, suggestView := range suggestViews {
 		if index == forceSuggestIndex {
 			suggestViews[index] = m.forceStyle.Render(suggestView)
+		} else {
+			suggestViews[index] = m.baseStyle.Render(suggestView)
 		}
 	}
 	return strings.Join(suggestViews, "\n")
@@ -330,7 +337,12 @@ func (m *PromptModel) SetHandlers(handlers map[string]*HandlerInfo) {
 }
 
 func (m *PromptModel) updateSuggentList() {
-	cmds := strings.Split(m.historyBuffers[m.historyIndex][:m.historyBufferPos], " ")
+	cmd := m.historyBuffers[m.historyIndex][:m.historyBufferPos]
+	if m.ignoreEmptyCmd && cmd == "" {
+		m.matchSuggests = make([]Suggest, 0)
+		return
+	}
+	cmds := strings.Split(cmd, " ")
 	if len(cmds) == 0 {
 		cmds = append(cmds, "")
 	}
