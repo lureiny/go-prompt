@@ -34,6 +34,10 @@ func DefaultGetHandlerSuggests(h *HandlerInfo, input string) ([]Suggest, error) 
 		inputs = append(inputs, "")
 	}
 	matchSuggests := make([]Suggest, 0)
+	// not need suggest
+	if len(inputs) >= 2 && inputs[len(inputs)-2][0] == '-' {
+		return matchSuggests, nil
+	}
 	for _, s := range h.Suggests {
 		if IsMatch(inputs[len(inputs)-1], s.Text) {
 			newSuggest := Suggest{
