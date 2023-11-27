@@ -86,14 +86,9 @@ func NewPromptModel(opts ...PromptModelOption) *PromptModel {
 }
 
 func initTextModel(m *PromptModel) error {
-	ti := textinput.New()
-	ti.Focus()
-	ti.Prompt = m.prefix
-	ti.CharLimit = 156
-	ti.Width = 100
-
-	m.textInput = ti
-
+	m.textInput = textinput.New()
+	m.textInput.Focus()
+	m.textInput.Prompt = m.prefix
 	return nil
 }
 
