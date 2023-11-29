@@ -49,6 +49,8 @@ type PromptModel struct {
 
 	exit bool
 
+	withHelpMsg bool
+
 	mutex sync.Mutex
 }
 
@@ -256,6 +258,9 @@ func (m *PromptModel) View() string {
 	s := m.textInput.View()
 	if m.SuggestView() != "" {
 		s += "\n" + m.SuggestView()
+	}
+	if m.withHelpMsg {
+		s += "\n" + HelpView()
 	}
 	return s
 }

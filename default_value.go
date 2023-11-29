@@ -23,3 +23,7 @@ var (
 	defaultSuggestPrefix string = "-"
 	defaultPrefix        string = ">>>"
 )
+
+var (
+	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render
+)

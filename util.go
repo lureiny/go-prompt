@@ -64,3 +64,9 @@ func max(a, b int) int {
 	}
 	return b
 }
+
+const helpMsg = "ctrl+d: exit; tab, shift+tab choise suggest; ↑↓ choise history cmd"
+
+func HelpView() string {
+	return helpStyle(helpMsg)
+}

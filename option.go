@@ -164,6 +164,12 @@ func filterAscii(buffer []byte) []byte {
 	}, buffer)
 }
 
+func WithHelpMsg() PromptModelOption {
+	return func(pm *PromptModel) {
+		pm.withHelpMsg = true
+	}
+}
+
 // -----------------------------------------------------------------------------------------------------------------
 // -                                        HandlerInfosOption                                                     -
 // -----------------------------------------------------------------------------------------------------------------

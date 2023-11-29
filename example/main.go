@@ -13,6 +13,7 @@ func main() {
 		prompt.WithSuggestNum(4),
 		prompt.WithDefaultHandlerCallback(helloCallback),
 		prompt.WithOutFile("out.log"),
+		prompt.WithHelpMsg(),
 	)
 	m.RegisterHandler(hello, "hello",
 		prompt.WithoutFlagSet(),
