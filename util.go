@@ -29,13 +29,22 @@ func IsMatch(input, suggest string) bool {
 type GetSuggestFunc func(h *HandlerInfo, input string) ([]Suggest, error)
 
 func DefaultGetHandlerSuggests(h *HandlerInfo, input string) ([]Suggest, error) {
-	inputs := strings.Split(input, " ")
-	if len(inputs) == 0 {
-		inputs = append(inputs, "")
+	splitedInput := strings.Split(input, " ")
+	if len(splitedInput) == 0 {
+		splitedInput = append(splitedInput, "")
 	}
+
+	// filter extra spaces
+	inputs := []string{}
+	for _, s := range splitedInput {
+		if len(s) > 0 {
+			inputs = append(inputs, s)
+		}
+	}
+
 	matchSuggests := make([]Suggest, 0)
-	// not need suggest
-	if len(inputs) >= 2 && inputs[len(inputs)-2][0] == '-' {
+	// input custom param, not need suggest
+	if len(inputs) >= 2 && (len(inputs[len(inputs)-2]) > 0 && inputs[len(inputs)-2][0] == '-') {
 		return matchSuggests, nil
 	}
 	for _, s := range h.Suggests {

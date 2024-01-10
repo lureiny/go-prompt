@@ -244,7 +244,7 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runCmdMark = false
 		return m, nil
 	case tea.WindowSizeMsg:
-		m.textInput.Width = msg.Width
+		m.textInput.Width = msg.Width - len(m.prefix) - 1 // 防止显示不全。 -1是为了显示force光标
 		return m, nil
 	}
 	return m, nil
