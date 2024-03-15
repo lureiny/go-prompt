@@ -144,6 +144,10 @@ func (m *PromptModel) runCmd(cmd string) tea.Cmd {
 	if len(strings.ReplaceAll(cmd, " ", "")) == 0 {
 		return nil
 	}
+	cmdWithTime := fmt.Sprintf("%s: %s", time.Now().Local().Format(timeFormat), cmd)
+	if m.readyToSaveHistory {
+		m.historyChan <- cmdWithTime + "\n"
+	}
 
 	handlerName := strings.Split(cmd, " ")[0]
 	handler, ok := m.handlerInfos[handlerName]
@@ -258,9 +262,6 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmdWithTime := fmt.Sprintf("%s: %s", time.Now().Local().Format(timeFormat), msg.cmd)
 		if !m.printCmd && m.printRunTime {
 			fmt.Println(cmdWithTime)
-		}
-		if m.readyToSaveHistory {
-			m.historyChan <- cmdWithTime + "\n"
 		}
 		time.Sleep(time.Duration(m.runCmdDeply * int64(time.Millisecond)))
 		m.runCmd(msg.cmd)
