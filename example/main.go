@@ -38,6 +38,8 @@ func main() {
 		prompt.WithSuggests([]prompt.Suggest{
 			{Text: "b", Description: "b"},
 			{Text: "name", Description: "every thing", Default: "bool"},
+			{Text: "c", Description: "every thing", Default: true},
+			{Text: "d", Description: "every thing", Default: true},
 		}))
 
 	if err := m.Run(); err != nil {
@@ -75,6 +77,6 @@ func calc(a, b int) string {
 	return "just calc " + fmt.Sprintf("a + b = %d + %d = %d", a, b, a+b)
 }
 
-func boolTest(b bool, name string) {
-	fmt.Println(b, name)
+func boolTest(b bool, name string, c, d bool) {
+	fmt.Println(b, name, c, d)
 }

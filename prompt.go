@@ -350,7 +350,7 @@ func (m *PromptModel) updateSuggentList() {
 		cmds = append(cmds, "")
 	}
 	handler, ok := m.handlerInfos[cmds[0]]
-	if !ok {
+	if !ok || len(cmds) == 1 {
 		m.genHandlerSuggests(cmds[0])
 	} else {
 		var matchSuggests []Suggest

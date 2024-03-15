@@ -1,6 +1,9 @@
 package prompt
 
-import "strings"
+import (
+	"reflect"
+	"strings"
+)
 
 func IsMatch(input, suggest string) bool {
 	index := 0
@@ -30,10 +33,6 @@ type GetSuggestFunc func(h *HandlerInfo, input string) ([]Suggest, error)
 
 func DefaultGetHandlerSuggests(h *HandlerInfo, input string) ([]Suggest, error) {
 	splitedInput := strings.Split(input, " ")
-	if len(splitedInput) == 0 {
-		splitedInput = append(splitedInput, "")
-	}
-
 	// filter extra spaces
 	inputs := []string{}
 	for _, s := range splitedInput {
@@ -42,9 +41,20 @@ func DefaultGetHandlerSuggests(h *HandlerInfo, input string) ([]Suggest, error) 
 		}
 	}
 
+	isInputLast := len(input) == 0 || input[len(input)-1] != ' '
+	if len(input) == 0 || !isInputLast {
+		inputs = append(inputs, "") // 添加空字符串表示当前在等待输入一个新的参数, inputs的最后一个一定是当前在输入的值
+	}
+
 	matchSuggests := make([]Suggest, 0)
 	// input custom param, not need suggest
-	if len(inputs) >= 2 && (len(inputs[len(inputs)-2]) > 0 && inputs[len(inputs)-2][0] == '-') {
+	notInputHandler := len(inputs) > 1
+	isInputParamValue := notInputHandler &&
+		(IsBoolSuggest(h.Suggests, inputs[len(inputs)-1], h.SuggestPrefix) ||
+			IsInputNotBoolValue(inputs, h.SuggestPrefix, h.Suggests))
+
+	// 正在输入参数值, 此时不反回suggest
+	if isInputParamValue {
 		return matchSuggests, nil
 	}
 	for _, s := range h.Suggests {
@@ -78,4 +88,27 @@ const helpMsg = "ctrl+d: exit; tab, shift+tab choise suggest; ↑↓ choise hist
 
 func HelpView() string {
 	return helpStyle(helpMsg)
+}
+
+func IsBoolSuggest(suggests []Suggest, input, suggestPrefix string) bool {
+	for _, s := range suggests {
+		prefix := suggestPrefix + s.Text + "="
+		if strings.Contains(input, prefix) {
+			return reflect.TypeOf(s.Default).String() == reflect.TypeOf(true).String()
+		}
+	}
+	return false
+}
+
+func IsSuggest(input, suggestPrefix string) bool {
+	return strings.HasPrefix(input, suggestPrefix)
+}
+
+func IsInputNotBoolValue(inputs []string, suggestPrefix string, suggests []Suggest) bool {
+	inputNum := len(inputs)
+	if inputNum < 2 {
+		return false
+	}
+
+	return IsSuggest(inputs[inputNum-2], suggestPrefix) && !IsBoolSuggest(suggests, inputs[inputNum-2], suggestPrefix)
 }
