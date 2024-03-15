@@ -51,6 +51,14 @@ type PromptModel struct {
 
 	withHelpMsg bool
 
+	printRunTime bool
+
+	// history
+	saveHistory        bool
+	historyFile        string
+	historyChan        chan string
+	readyToSaveHistory bool
+
 	mutex sync.Mutex
 }
 
@@ -78,7 +86,15 @@ func NewPromptModel(opts ...PromptModelOption) *PromptModel {
 		runCmdDeply: defaultRunCmdDeply,
 		printCmd:    defaultPrintCmd,
 
-		initFuncs: []PromptModelInitFunc{initTextModel},
+		withHelpMsg:  true,
+		printRunTime: true,
+
+		saveHistory:        true,
+		historyFile:        defaultHistoryFile,
+		historyChan:        make(chan string, 1000),
+		readyToSaveHistory: false,
+
+		initFuncs: []PromptModelInitFunc{initTextModel, loadHistory, startSaveHistory},
 	}
 	for _, opt := range opts {
 		opt(model)
@@ -239,6 +255,13 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case RunCmdMsg:
+		cmdWithTime := fmt.Sprintf("%s: %s", time.Now().Local().Format(timeFormat), msg.cmd)
+		if !m.printCmd && m.printRunTime {
+			fmt.Println(cmdWithTime)
+		}
+		if m.readyToSaveHistory {
+			m.historyChan <- cmdWithTime + "\n"
+		}
 		time.Sleep(time.Duration(m.runCmdDeply * int64(time.Millisecond)))
 		m.runCmd(msg.cmd)
 		m.runCmdMark = false

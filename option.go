@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 	"unicode"
 
@@ -168,6 +169,90 @@ func WithHelpMsg() PromptModelOption {
 	return func(pm *PromptModel) {
 		pm.withHelpMsg = true
 	}
+}
+
+func WithOutHelpMsg() PromptModelOption {
+	return func(pm *PromptModel) {
+		pm.withHelpMsg = false
+	}
+}
+
+func WithOutPrintRunTime() PromptModelOption {
+	return func(pm *PromptModel) {
+		pm.printRunTime = false
+	}
+}
+
+func WithHistoryFile(file string) PromptModelOption {
+	return func(pm *PromptModel) {
+		if file == "" {
+			file = defaultHistoryFile
+		}
+		pm.historyFile = file
+	}
+}
+
+func WithOutSaveHistory() PromptModelOption {
+	return func(pm *PromptModel) {
+		pm.saveHistory = false
+	}
+}
+
+func WithSaveHistory() PromptModelOption {
+	return func(pm *PromptModel) {
+		pm.saveHistory = true
+	}
+}
+
+func loadHistory(m *PromptModel) error {
+	data, err := os.ReadFile(m.historyFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	m.historyBuffers = make([]string, 0) // 清空历史记录
+	historys := strings.Split(string(data), "\n")
+	// history format: "{time like timeFormat}: {cmd}"
+	spaceLen := 2
+	for _, h := range historys {
+		if len(h) <= len(timeFormat)+spaceLen {
+			continue
+		}
+
+		if _, err := time.Parse(timeFormat, h[:len(timeFormat)]); err != nil {
+			continue
+		}
+		m.historyBuffers = append(m.historyBuffers, h[len(timeFormat)+spaceLen:])
+		m.historys = append(m.historys, h[len(timeFormat)+spaceLen:])
+	}
+
+	m.historyBuffers = append(m.historyBuffers, "")
+	m.historyIndex = len(m.historyBuffers) - 1
+	return nil
+}
+
+func startSaveHistory(m *PromptModel) error {
+	if !m.saveHistory || m.historyFile == "" {
+		return nil
+	}
+	go func(ch <-chan string) {
+		outputFile, err := os.OpenFile(m.historyFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			fmt.Printf("open out file[%s] fail, err: %v\n", m.outFile, err)
+			return
+		}
+		defer outputFile.Close()
+		m.readyToSaveHistory = true
+		defer func() {
+			m.readyToSaveHistory = false
+		}()
+		for cmd := range ch {
+			outputFile.Write([]byte(cmd))
+		}
+	}(m.historyChan)
+	return nil
 }
 
 // -----------------------------------------------------------------------------------------------------------------

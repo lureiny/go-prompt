@@ -22,6 +22,8 @@ var (
 	defaultSuggestNum    int    = 3
 	defaultSuggestPrefix string = "-"
 	defaultPrefix        string = ">>>"
+
+	defaultHistoryFile string = ".prompt.history"
 )
 
 var (
