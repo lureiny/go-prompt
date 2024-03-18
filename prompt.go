@@ -316,6 +316,9 @@ func (m *PromptModel) SuggestView() string {
 
 func getSuggestView(s Suggest) string {
 	if s.SuggestType == SuggestOfHandler {
+		if s.Description != "" {
+			return fmt.Sprintf("%s: %s", s.Text, s.Description)
+		}
 		return s.Text
 	}
 	return fmt.Sprintf("%s, default: %v, description: %s", s.Text, s.Default, s.Description)
@@ -397,11 +400,12 @@ func (m *PromptModel) updateSuggentList() {
 
 func (m *PromptModel) genHandlerSuggests(input string) {
 	m.matchSuggests = make([]Suggest, 0)
-	for handlerName := range m.handlerInfos {
+	for handlerName, h := range m.handlerInfos {
 		if IsMatch(input, handlerName) {
 			m.matchSuggests = append(m.matchSuggests, Suggest{
 				Text:        handlerName,
 				SuggestType: SuggestOfHandler,
+				Description: h.HelpMsg,
 			})
 		}
 	}

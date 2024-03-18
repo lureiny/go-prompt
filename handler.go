@@ -25,6 +25,8 @@ type HandlerInfo struct {
 	FlagsSet *flag.FlagSet
 	Params   []interface{}
 
+	HelpMsg string
+
 	UseFlagSet bool // use flag set to parse param
 }
 

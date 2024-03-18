@@ -290,3 +290,9 @@ func WithGetSuggestMethod(f GetSuggestFunc) HandlerInfosOption {
 		h.GetSuggestMethod = f
 	}
 }
+
+func WithHandlerHelpMsg(helpMsg string) HandlerInfosOption {
+	return func(h *HandlerInfo) {
+		h.HelpMsg = helpMsg
+	}
+}

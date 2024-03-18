@@ -20,6 +20,7 @@ func main() {
 		prompt.WithSuggests([]prompt.Suggest{
 			{Text: "people", Default: "world", Description: "say hello"},
 		}),
+		prompt.WithHandlerHelpMsg("say hello to someone"),
 	)
 	m.RegisterHandler(hello2, "hello2",
 		prompt.WithSuggests([]prompt.Suggest{
