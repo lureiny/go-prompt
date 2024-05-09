@@ -1,6 +1,8 @@
 package prompt
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/lipgloss"
+)
 
 var (
 	defaultBaseStyle = lipgloss.NewStyle().
@@ -28,4 +30,8 @@ var (
 
 var (
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render
+)
+
+var (
+	DefaultExitFunc = func() {}
 )

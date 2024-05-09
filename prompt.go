@@ -157,6 +157,10 @@ func (m *PromptModel) runCmd(cmd string) tea.Cmd {
 	if err := handler.Run(cmd); err != nil {
 		return tea.Printf("run cmd of handler[%s] fail, err: %v", handlerName, err)
 	}
+	if handler.ExitAfterRun {
+		m.exit = true
+		return tea.Quit
+	}
 	return nil
 }
 
@@ -165,17 +169,7 @@ func (m *PromptModel) Init() tea.Cmd {
 }
 
 func (m *PromptModel) getCurrentCmdString() string {
-	cmdString := ""
-	// filter extra spaces
-	lastBuffer := ' '
-	for index, buffer := range m.historyBuffers[m.historyIndex] {
-		if buffer == ' ' && lastBuffer == buffer {
-			continue
-		}
-		cmdString += m.historyBuffers[m.historyIndex][index : index+1]
-		lastBuffer = buffer
-	}
-	return cmdString
+	return strings.Join(strings.Fields(m.historyBuffers[m.historyIndex]), " ")
 }
 
 func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -264,9 +258,9 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			fmt.Println(cmdWithTime)
 		}
 		time.Sleep(time.Duration(m.runCmdDeply * int64(time.Millisecond)))
-		m.runCmd(msg.cmd)
+		cmd := m.runCmd(msg.cmd)
 		m.runCmdMark = false
-		return m, nil
+		return m, cmd
 	case tea.WindowSizeMsg:
 		m.textInput.Width = msg.Width - len(m.prefix) - 1 // 防止显示不全。 -1是为了显示force光标
 		return m, nil

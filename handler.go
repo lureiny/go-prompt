@@ -28,6 +28,8 @@ type HandlerInfo struct {
 	HelpMsg string
 
 	UseFlagSet bool // use flag set to parse param
+
+	ExitAfterRun bool
 }
 
 func NewHandlerInfo(name string, handler Handler, opts ...HandlerInfosOption) *HandlerInfo {

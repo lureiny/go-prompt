@@ -296,3 +296,9 @@ func WithHandlerHelpMsg(helpMsg string) HandlerInfosOption {
 		h.HelpMsg = helpMsg
 	}
 }
+
+func WithExitAfterRun(isExitAfterRun bool) HandlerInfosOption {
+	return func(h *HandlerInfo) {
+		h.ExitAfterRun = isExitAfterRun
+	}
+}

@@ -43,6 +43,8 @@ func main() {
 			{Text: "d", Description: "every thing", Default: true},
 		}))
 
+	m.RegisterHandler(prompt.DefaultExitFunc, "exit", prompt.WithExitAfterRun(true))
+
 	if err := m.Run(); err != nil {
 		panic(err)
 	}
