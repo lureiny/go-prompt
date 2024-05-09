@@ -32,7 +32,7 @@ type HandlerInfo struct {
 	ExitAfterRun bool
 }
 
-func NewHandlerInfo(name string, handler Handler, opts ...HandlerInfosOption) *HandlerInfo {
+func NewHandlerInfo(name string, handler Handler, opts ...HandlerInfoOption) *HandlerInfo {
 	h := &HandlerInfo{
 		Handler:           handler,
 		HandlerReflecType: reflect.TypeOf(handler),

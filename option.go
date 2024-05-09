@@ -256,48 +256,48 @@ func startSaveHistory(m *PromptModel) error {
 }
 
 // -----------------------------------------------------------------------------------------------------------------
-// -                                        HandlerInfosOption                                                     -
+// -                                        HandlerInfoOption                                                     -
 // -----------------------------------------------------------------------------------------------------------------
 
-type HandlerInfosOption func(h *HandlerInfo)
+type HandlerInfoOption func(h *HandlerInfo)
 
-func WithCallback(callback HandlerCallback) HandlerInfosOption {
+func WithCallback(callback HandlerCallback) HandlerInfoOption {
 	return func(h *HandlerInfo) {
 		h.Callback = callback
 	}
 }
 
-func WithSuggests(suggests []Suggest) HandlerInfosOption {
+func WithSuggests(suggests []Suggest) HandlerInfoOption {
 	return func(h *HandlerInfo) {
 		h.Suggests = suggests
 	}
 }
 
-func WithSuggestPrefix(prefix string) HandlerInfosOption {
+func WithSuggestPrefix(prefix string) HandlerInfoOption {
 	return func(h *HandlerInfo) {
 		h.SuggestPrefix = prefix
 	}
 }
 
-func WithoutFlagSet() HandlerInfosOption {
+func WithoutFlagSet() HandlerInfoOption {
 	return func(h *HandlerInfo) {
 		h.UseFlagSet = false
 	}
 }
 
-func WithGetSuggestMethod(f GetSuggestFunc) HandlerInfosOption {
+func WithGetSuggestMethod(f GetSuggestFunc) HandlerInfoOption {
 	return func(h *HandlerInfo) {
 		h.GetSuggestMethod = f
 	}
 }
 
-func WithHandlerHelpMsg(helpMsg string) HandlerInfosOption {
+func WithHandlerHelpMsg(helpMsg string) HandlerInfoOption {
 	return func(h *HandlerInfo) {
 		h.HelpMsg = helpMsg
 	}
 }
 
-func WithExitAfterRun(isExitAfterRun bool) HandlerInfosOption {
+func WithExitAfterRun(isExitAfterRun bool) HandlerInfoOption {
 	return func(h *HandlerInfo) {
 		h.ExitAfterRun = isExitAfterRun
 	}

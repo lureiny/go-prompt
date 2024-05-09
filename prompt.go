@@ -118,7 +118,7 @@ func (m *PromptModel) init() {
 	}
 }
 
-func (m *PromptModel) RegisterHandler(handler Handler, name string, opts ...HandlerInfosOption) {
+func (m *PromptModel) RegisterHandler(handler Handler, name string, opts ...HandlerInfoOption) {
 	handlerInfos := NewHandlerInfo(name, handler, opts...)
 	m.RegisterHandlerInfos(handlerInfos)
 }
