@@ -302,3 +302,9 @@ func WithExitAfterRun(isExitAfterRun bool) HandlerInfoOption {
 		h.ExitAfterRun = isExitAfterRun
 	}
 }
+
+func WithFlagSetInitFunc(f FlagSetInitFunc) HandlerInfoOption {
+	return func(h *HandlerInfo) {
+		h.FlagSetInitFuncImpl = f
+	}
+}

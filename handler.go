@@ -12,6 +12,8 @@ type Handler interface{} // func
 
 type HandlerCallback func([]reflect.Value)
 
+type FlagSetInitFunc func(funcType reflect.Type) (*flag.FlagSet, []interface{}, error)
+
 type HandlerInfo struct {
 	Handler           Handler
 	HandlerReflecType reflect.Type
@@ -27,7 +29,8 @@ type HandlerInfo struct {
 
 	HelpMsg string
 
-	UseFlagSet bool // use flag set to parse param
+	UseFlagSet          bool // use flag set to parse param
+	FlagSetInitFuncImpl FlagSetInitFunc
 
 	ExitAfterRun bool
 }
@@ -43,7 +46,8 @@ func NewHandlerInfo(name string, handler Handler, opts ...HandlerInfoOption) *Ha
 		Name:   name,
 		Params: make([]interface{}, 0),
 
-		UseFlagSet: true,
+		UseFlagSet:          true,
+		FlagSetInitFuncImpl: nil,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -54,6 +58,11 @@ func NewHandlerInfo(name string, handler Handler, opts ...HandlerInfoOption) *Ha
 func (h *HandlerInfo) InitParamsAndFlagSet() error {
 	if !h.UseFlagSet {
 		return nil
+	}
+	var err error = nil
+	if h.FlagSetInitFuncImpl != nil {
+		h.FlagsSet, h.Params, err = h.FlagSetInitFuncImpl(h.HandlerReflecType)
+		return err
 	}
 	h.FlagsSet = flag.NewFlagSet(h.Name, flag.ContinueOnError)
 	h.Params = make([]interface{}, 0)
