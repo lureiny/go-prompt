@@ -80,28 +80,36 @@ func (h *HandlerInfo) InitParamsAndFlagSet() error {
 	return nil
 }
 
-func (h *HandlerInfo) Run(cmd string) error {
+func (h *HandlerInfo) Run(cmd string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v", r)
+		}
+	}()
 	fn := reflect.ValueOf(h.Handler)
 
 	args := []reflect.Value{}
 	if h.UseFlagSet {
 		// parse param
-		if err := h.FlagsSet.Parse(strings.Split(cmd, " ")[1:]); err != nil {
-			return fmt.Errorf("can't parse handler[%s] args", h.Name)
+		if err = h.FlagsSet.Parse(strings.Split(cmd, " ")[1:]); err != nil {
+			err = fmt.Errorf("can't parse handler[%s] args, err: %v", h.Name, err)
+			return
 		}
-		for _, param := range h.Params {
-			args = append(args, reflect.ValueOf(param).Elem())
+		numIn := h.HandlerReflecType.NumIn()
+		for i := 0; i < numIn; i++ {
+			v := h.HandlerReflecType.In(i)
+			args = append(args, convertParam(h.Params[i], v))
 		}
-	} else {
-		args = append(args, reflect.ValueOf(cmd))
 	}
 
 	results := fn.Call(args)
 	if h.Callback != nil {
 		h.Callback(results)
 	}
-	h.InitParamsAndFlagSet()
-	return nil
+	if err := h.InitParamsAndFlagSet(); err != nil {
+		panic(err)
+	}
+	return
 }
 
 func (h *HandlerInfo) CheckAndInitHandler() error {
@@ -162,18 +170,14 @@ func initIterfaceParams(suggest *Suggest, valueType reflect.Type, h *HandlerInfo
 	switch valueType.String() {
 	case "string":
 		param = h.FlagsSet.String(suggest.Text, suggest.Default.(string), suggest.Description)
-	case "int":
-		param = h.FlagsSet.Int(suggest.Text, suggest.Default.(int), suggest.Description)
-	case "int64":
-		param = h.FlagsSet.Int64(suggest.Text, suggest.Default.(int64), suggest.Description)
-	case "float64":
-		param = h.FlagsSet.Float64(suggest.Text, suggest.Default.(float64), suggest.Description)
+	case "int", "int8", "int16", "int32", "int64":
+		param = h.FlagsSet.Int64(suggest.Text, intxToInt64(suggest.Default), suggest.Description)
+	case "float64", "float32":
+		param = h.FlagsSet.Float64(suggest.Text, floatxToFloat64(suggest.Default), suggest.Description)
 	case "bool":
 		param = h.FlagsSet.Bool(suggest.Text, suggest.Default.(bool), suggest.Description)
-	case "uint":
-		param = h.FlagsSet.Uint(suggest.Text, suggest.Default.(uint), suggest.Description)
-	case "uint64":
-		param = h.FlagsSet.Uint64(suggest.Text, suggest.Default.(uint64), suggest.Description)
+	case "uint", "uint8", "uint16", "uint32", "uint64":
+		param = h.FlagsSet.Uint64(suggest.Text, uintxToUint64(suggest.Default), suggest.Description)
 	default:
 		return fmt.Errorf("value type[%s] is not support by flag set", valueType.String())
 	}
@@ -195,23 +199,25 @@ func isNil(i interface{}) bool {
 func getDefaultValue(valueType reflect.Type) (interface{}, error) {
 	zeroValue := reflect.Zero(valueType)
 	defaultValue := fmt.Sprintf("%v", zeroValue)
-	switch valueType.String() {
+	valueTypeString := valueType.String()
+	var value interface{} = nil
+	var err error = nil
+	switch valueTypeString {
 	case "string":
 		return defaultValue, nil
-	case "int":
-		return strconv.Atoi(defaultValue)
-	case "int64":
-		return strconv.ParseInt(defaultValue, 10, 64)
-	case "float64":
-		return strconv.ParseFloat(defaultValue, 64)
+	case "int", "int8", "int16", "int32", "int64":
+		value, err = strconv.ParseInt(defaultValue, 10, 64)
+		value = int64ToIntx(value, valueType)
+	case "float64", "float32":
+		value, err = strconv.ParseFloat(defaultValue, 64)
+		value = float64ToFloatx(value, valueType)
 	case "bool":
 		return defaultValue == "true", nil
-	case "uint":
-		defaultUint, err := strconv.ParseUint(defaultValue, 10, 16)
-		return uint(defaultUint), err
-	case "uint64":
-		return strconv.ParseUint(defaultValue, 10, 64)
+	case "uint", "uint8", "uint16", "uint32", "uint64":
+		value, err = strconv.ParseUint(defaultValue, 10, 64)
+		value = uint64ToUintx(value, valueType)
 	default:
-		return nil, fmt.Errorf("value type[%s] is not support", valueType.String())
+		err = fmt.Errorf("value type[%s] is not support", valueType.String())
 	}
+	return value, err
 }

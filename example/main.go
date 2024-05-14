@@ -11,7 +11,6 @@ func main() {
 	m := prompt.NewPrompt(
 		prompt.WithPromptPrefixOption(">>> "),
 		prompt.WithSuggestNum(4),
-		prompt.WithDefaultHandlerCallback(helloCallback),
 		prompt.WithOutFile("out.log"),
 		prompt.WithHelpMsg(),
 	)
@@ -32,7 +31,7 @@ func main() {
 		}))
 	m.RegisterHandler(calc, "calc",
 		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "a", Default: 10, Description: "a"},
+			{Text: "a", Default: int16(10000), Description: "a"},
 			{Text: "b", Description: "b"},
 		}))
 	m.RegisterHandler(boolTest, "boolTest",
@@ -75,7 +74,7 @@ func hello2(people string) {
 	fmt.Println("hello2", people)
 }
 
-func calc(a, b int) string {
+func calc(a, b int16) string {
 	fmt.Printf("a + b = %d + %d = %d\n", a, b, a+b)
 	return "just calc " + fmt.Sprintf("a + b = %d + %d = %d", a, b, a+b)
 }

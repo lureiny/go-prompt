@@ -1,6 +1,8 @@
 package prompt
 
 import (
+	"fmt"
+	"math"
 	"reflect"
 	"strings"
 )
@@ -111,4 +113,167 @@ func IsInputNotBoolValue(inputs []string, suggestPrefix string, suggests []Sugge
 	}
 
 	return IsSuggest(inputs[inputNum-2], suggestPrefix) && !IsBoolSuggest(suggests, inputs[inputNum-2], suggestPrefix)
+}
+
+func floatxToFloat64(val interface{}) float64 {
+	switch val.(type) {
+	case float64:
+		return val.(float64)
+	case float32:
+		return float64(val.(float32))
+	default:
+		panic("val is not float")
+	}
+}
+
+func intxToInt64(val interface{}) int64 {
+	switch val.(type) {
+	case int8:
+		return int64(val.(int8))
+	case int16:
+		return int64(val.(int16))
+	case int32:
+		return int64(val.(int32))
+	case int64:
+		return val.(int64)
+	default:
+		panic("val is not int")
+	}
+}
+
+func uintxToUint64(val interface{}) uint64 {
+	switch val.(type) {
+	case uint8:
+		return uint64(val.(uint8))
+	case int16:
+		return uint64(val.(uint16))
+	case int32:
+		return uint64(val.(uint32))
+	case int64:
+		return val.(uint64)
+	default:
+		panic("val is not uint")
+	}
+}
+
+const rangeOutString = "invalid value '%v' for %v param"
+
+func int64ToIntx(src interface{}, dst reflect.Type) interface{} {
+	var srcData int64 = 0
+	switch src.(type) {
+	case *int64:
+		p := src.(*int64)
+		srcData = *p
+	case int64:
+		srcData = src.(int64)
+	default:
+		panic("src is not int64 or *int64")
+	}
+
+	switch dst.String() {
+	case "int8":
+		if srcData < math.MinInt8 || srcData > math.MaxInt8 {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return int8(srcData)
+	case "int16":
+		if srcData < math.MinInt16 || srcData > math.MaxInt16 {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return int16(srcData)
+	case "int32":
+		if srcData < math.MinInt32 || srcData > math.MaxInt32 {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return int32(srcData)
+	case "int":
+		if srcData < math.MinInt || srcData > math.MaxInt {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return int(srcData)
+	case "int64":
+		return srcData
+	default:
+		panic("dst is not int")
+	}
+}
+
+func uint64ToUintx(src interface{}, dst reflect.Type) interface{} {
+	var srcData uint64 = 0
+	switch src.(type) {
+	case *uint64:
+		p64 := src.(*uint64)
+		srcData = *p64
+	case uint64:
+		srcData = src.(uint64)
+	default:
+		panic("src is not uint64 or *uint64")
+	}
+	switch dst.String() {
+	case "uint8":
+		if srcData > math.MaxUint8 {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return uint8(srcData)
+	case "uint16":
+		if srcData > math.MaxUint16 {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return uint16(srcData)
+	case "uint32":
+		if srcData > math.MaxUint32 {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return uint32(srcData)
+	case "uint":
+		if srcData > math.MaxUint {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return uint(srcData)
+	case "uint64":
+		return srcData
+	default:
+		panic("dst is not uint")
+	}
+}
+
+func float64ToFloatx(src interface{}, dst reflect.Type) interface{} {
+	var srcData float64 = 0
+	switch src.(type) {
+	case *float64:
+		p64 := src.(*float64)
+		srcData = *p64
+	case float64:
+		srcData = src.(float64)
+	default:
+		panic("src is not float64 or *float64")
+	}
+
+	switch dst.String() {
+	case "float32":
+		if srcData > math.MaxFloat32 {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return float32(srcData)
+	case "float64":
+		if srcData > math.MaxFloat64 {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return srcData
+	default:
+		panic("dst is not float")
+	}
+}
+
+func convertParam(src interface{}, dst reflect.Type) reflect.Value {
+	switch src.(type) {
+	case *int64, int64:
+		return reflect.ValueOf(int64ToIntx(src, dst))
+	case *float64, float64:
+		return reflect.ValueOf(float64ToFloatx(src, dst))
+	case *uint64, uint64:
+		return reflect.ValueOf(uint64ToUintx(src, dst))
+	default:
+		return reflect.ValueOf(src).Elem()
+	}
 }
