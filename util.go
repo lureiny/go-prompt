@@ -128,6 +128,8 @@ func floatxToFloat64(val interface{}) float64 {
 
 func intxToInt64(val interface{}) int64 {
 	switch val.(type) {
+	case int:
+		return int64(val.(int))
 	case int8:
 		return int64(val.(int8))
 	case int16:
@@ -143,6 +145,8 @@ func intxToInt64(val interface{}) int64 {
 
 func uintxToUint64(val interface{}) uint64 {
 	switch val.(type) {
+	case uint:
+		return uint64(val.(uint))
 	case uint8:
 		return uint64(val.(uint8))
 	case int16:
@@ -171,6 +175,11 @@ func int64ToIntx(src interface{}, dst reflect.Type) interface{} {
 	}
 
 	switch dst.String() {
+	case "int":
+		if srcData < math.MinInt || srcData > math.MaxInt {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return int(srcData)
 	case "int8":
 		if srcData < math.MinInt8 || srcData > math.MaxInt8 {
 			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
@@ -186,11 +195,6 @@ func int64ToIntx(src interface{}, dst reflect.Type) interface{} {
 			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
 		}
 		return int32(srcData)
-	case "int":
-		if srcData < math.MinInt || srcData > math.MaxInt {
-			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
-		}
-		return int(srcData)
 	case "int64":
 		return srcData
 	default:
@@ -210,6 +214,11 @@ func uint64ToUintx(src interface{}, dst reflect.Type) interface{} {
 		panic("src is not uint64 or *uint64")
 	}
 	switch dst.String() {
+	case "uint":
+		if srcData > math.MaxUint {
+			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
+		}
+		return uint(srcData)
 	case "uint8":
 		if srcData > math.MaxUint8 {
 			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
@@ -225,11 +234,6 @@ func uint64ToUintx(src interface{}, dst reflect.Type) interface{} {
 			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
 		}
 		return uint32(srcData)
-	case "uint":
-		if srcData > math.MaxUint {
-			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
-		}
-		return uint(srcData)
 	case "uint64":
 		return srcData
 	default:
