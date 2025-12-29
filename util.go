@@ -149,11 +149,11 @@ func uintxToUint64(val interface{}) uint64 {
 		return uint64(val.(uint))
 	case uint8:
 		return uint64(val.(uint8))
-	case int16:
+	case uint16:
 		return uint64(val.(uint16))
-	case int32:
+	case uint32:
 		return uint64(val.(uint32))
-	case int64:
+	case uint64:
 		return val.(uint64)
 	default:
 		panic("val is not uint")
