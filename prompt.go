@@ -177,7 +177,16 @@ func (m *PromptModel) Init() tea.Cmd {
 }
 
 func (m *PromptModel) getCurrentCmdString() string {
-	return strings.Join(strings.Fields(m.historyBuffers[m.historyIndex]), " ")
+	// Split only on the ASCII space, matching the suggestion and flag-parse paths
+	// (which use strings.Split on " "). strings.Fields would additionally split on
+	// Unicode whitespace such as the full-width space U+3000 that CJK IMEs emit in
+	// full-width mode, silently rewriting it to an ASCII space and corrupting the
+	// argument/flag value and the saved history. Treat U+3000 as a normal
+	// character (like a shell does), so tokenization is consistent everywhere.
+	fields := strings.FieldsFunc(m.historyBuffers[m.historyIndex], func(r rune) bool {
+		return r == ' '
+	})
+	return strings.Join(fields, " ")
 }
 
 // syncBufferPos records the cursor position as a byte offset into the current

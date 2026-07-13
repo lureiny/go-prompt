@@ -70,6 +70,50 @@ func TestEffectiveSuggestNum(t *testing.T) {
 	}
 }
 
+// completeUTF8Len must return a length that never cuts a multibyte rune.
+func TestCompleteUTF8Len(t *testing.T) {
+	full := []byte("查") // E6 9F A5 (3 bytes)
+	if got := completeUTF8Len(full); got != 3 {
+		t.Errorf("complete rune: got %d, want 3", got)
+	}
+	if got := completeUTF8Len(full[:2]); got != 0 {
+		t.Errorf("2/3 of a rune: got %d, want 0", got)
+	}
+	if got := completeUTF8Len(full[:1]); got != 0 {
+		t.Errorf("1/3 of a rune: got %d, want 0", got)
+	}
+	mixed := append([]byte("ab"), full...) // "ab查"
+	if got := completeUTF8Len(mixed); got != len(mixed) {
+		t.Errorf("ab查: got %d, want %d", got, len(mixed))
+	}
+	if got := completeUTF8Len(mixed[:3]); got != 2 { // "ab" + first byte of 查
+		t.Errorf("ab + partial rune: got %d, want 2", got)
+	}
+	if got := completeUTF8Len([]byte{}); got != 0 {
+		t.Errorf("empty: got %d, want 0", got)
+	}
+	if got := completeUTF8Len([]byte("abc")); got != 3 {
+		t.Errorf("ascii: got %d, want 3", got)
+	}
+}
+
+// IsBoolSuggest must recognize a bool flag whether or not '=' is present.
+func TestIsBoolSuggestValuelessFlag(t *testing.T) {
+	suggests := []Suggest{{Text: "verbose", Default: false}, {Text: "name", Default: ""}}
+	if !IsBoolSuggest(suggests, "-verbose", "-") {
+		t.Error("value-less -verbose should be recognized as bool")
+	}
+	if !IsBoolSuggest(suggests, "-verbose=true", "-") {
+		t.Error("-verbose=true should be recognized as bool")
+	}
+	if IsBoolSuggest(suggests, "-name", "-") {
+		t.Error("string flag -name should not be bool")
+	}
+	if IsBoolSuggest(suggests, "name", "-") {
+		t.Error("a token without the prefix should return false")
+	}
+}
+
 // Help text no longer contains the old "choise" typo.
 func TestHelpTextSpelling(t *testing.T) {
 	v := HelpView()

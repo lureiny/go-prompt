@@ -145,19 +145,37 @@ func redirectStdout(m *PromptModel) error {
 		defer close(consoleChan)
 		defer close(outFileChan)
 		buf := make([]byte, 1024)
+		var carry []byte // trailing bytes of an incomplete UTF-8 rune held back
+		send := func(b []byte) {
+			if len(b) == 0 {
+				return
+			}
+			// Copy because buf is reused next iteration and both consumers read
+			// the slice concurrently.
+			chunk := make([]byte, len(b))
+			copy(chunk, b)
+			consoleChan <- chunk
+			outFileChan <- chunk
+		}
 		for {
 			n, err := reader.Read(buf)
 			if n > 0 {
 				// Forward only the bytes actually read (not the whole 1024-byte
-				// buffer, which would append NUL padding). Copy because buf is
-				// reused on the next iteration and both consumers read concurrently.
-				chunk := make([]byte, n)
-				copy(chunk, buf[:n])
-				consoleChan <- chunk
-				outFileChan <- chunk
+				// buffer, which would append NUL padding), and split on a rune
+				// boundary so a multibyte (e.g. CJK) rune straddling two reads is
+				// not decoded as two halves — otherwise filterAscii's per-chunk
+				// bytes.Map would rewrite each half as U+FFFD.
+				data := make([]byte, 0, len(carry)+n)
+				data = append(data, carry...)
+				data = append(data, buf[:n]...)
+				keep := completeUTF8Len(data)
+				send(data[:keep])
+				carry = append([]byte(nil), data[keep:]...)
 			}
 			if err != nil {
-				// EOF or a closed pipe on shutdown: stop instead of busy-looping.
+				// EOF or a closed pipe on shutdown: flush any trailing bytes and
+				// stop instead of busy-looping.
+				send(carry)
 				return
 			}
 		}
