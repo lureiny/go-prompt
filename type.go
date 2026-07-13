@@ -2,9 +2,13 @@ package prompt
 
 import (
 	"reflect"
+	"sync"
 )
 
-var supportTypeMap = map[string]reflect.Type{}
+var (
+	supportTypeMu  sync.RWMutex
+	supportTypeMap = map[string]reflect.Type{}
+)
 
 func init() {
 	initSupportTypes := []interface{}{
@@ -19,11 +23,23 @@ func init() {
 	}
 }
 
+// RegisterType marks the dynamic type of i as an accepted handler parameter type
+// for the default flag-based parameter binding's type gate.
+//
+// Note: the built-in flag binding only knows how to parse the built-in scalar
+// types (string, bool, the int/uint families, and float32/64). Registering a
+// genuinely custom type is therefore not sufficient on its own — you must also
+// supply a custom binding via WithFlagSetInitFunc, which bypasses the built-in
+// parameter parsing entirely. Safe for concurrent use.
 func RegisterType(i interface{}) {
+	supportTypeMu.Lock()
+	defer supportTypeMu.Unlock()
 	supportTypeMap[reflect.TypeOf(i).String()] = reflect.TypeOf(i)
 }
 
 func isSupportType(name string) (reflect.Type, bool) {
+	supportTypeMu.RLock()
+	defer supportTypeMu.RUnlock()
 	t, ok := supportTypeMap[name]
 	return t, ok
 }

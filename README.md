@@ -19,88 +19,56 @@ go-prompt是一个用Go语言编写的开源框架，旨在帮助用户轻松创
 
 以下是一个示例代码，演示了如何使用go-prompt创建一个命令行工具：
 
+完整可运行示例见 [`example/main.go`](example/main.go)：
+
 ```go
 package main
 
 import (
 	"fmt"
-	"reflect"
 
-	"github.com/lureiny/go-prompt"
+	prompt "github.com/lureiny/go-prompt"
 )
 
 func main() {
 	m := prompt.NewPrompt(
 		prompt.WithPromptPrefixOption(">>> "),
 		prompt.WithSuggestNum(4),
-		prompt.WithDefaultHandlerCallback(helloCallback),
 		prompt.WithOutFile("out.log"),
+		prompt.WithHelpMsg(),
 	)
+	// WithoutFlagSet：handler 签名必须是 func(string)，收到的是去掉命令名后的参数串。
 	m.RegisterHandler(hello, "hello",
 		prompt.WithoutFlagSet(),
-		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "people", Default: "world", Description: "say hello"},
-		}),
+		prompt.WithHandlerHelpMsg("say hello to someone"),
 	)
-	m.RegisterHandler(hello2, "hello2",
-		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "people", Default: "world", Description: "say hello"},
-		}))
-	m.RegisterHandler(hello1, "hello1",
-		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "people", Default: "world", Description: "say hello"},
-		}))
+	// 默认（flag 模式）：Suggest 数量必须等于参数个数，每个参数变成一个 flag。
 	m.RegisterHandler(calc, "calc",
 		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "a", Default: 10, Description: "a"},
+			{Text: "a", Default: int16(10000), Description: "a"},
 			{Text: "b", Description: "b"},
 		}))
-	m.RegisterHandler(boolTest, "boolTest",
-		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "b", Description: "b"},
-		}))
+	// WithExitAfterRun：运行后退出程序。
+	m.RegisterHandler(prompt.DefaultExitFunc, "exit", prompt.WithExitAfterRun(true))
 
 	if err := m.Run(); err != nil {
 		panic(err)
 	}
 }
 
-func hello(people string) string {
+// WithoutFlagSet handler：输入 "hello world" 时 people == "world"（命令名已被去掉）。
+func hello(people string) {
 	fmt.Println("hello", people)
-	return "just say hello " + people
 }
 
-func helloCallback(results []reflect.Value) {
-	if len(results) == 0 {
-		return
-	}
-	for _, r := range results {
-		if r.Kind() == reflect.String {
-			fmt.Println(r.String())
-		}
-	}
-
-}
-
-func hello1(people string) {
-	fmt.Println("hello1", people)
-}
-
-func hello2(people string) {
-	fmt.Println("hello2", people)
-}
-
-func calc(a, b int) string {
+func calc(a, b int16) {
 	fmt.Printf("a + b = %d + %d = %d\n", a, b, a+b)
-	return "just calc " + fmt.Sprintf("a + b = %d + %d = %d", a, b, a+b)
-}
-
-func boolTest(b bool) {
-	fmt.Println(b)
 }
 ```
 
-这个示例代码展示了如何使用go-prompt创建一个交互式的命令行工具。您可以定义不同的Handler来处理不同的命令，还可以使用提示（Suggest）来帮助用户输入。
+这个示例展示了如何用 go-prompt 创建交互式命令行工具：定义不同的 Handler 处理命令，用 Suggest 提供补全提示。
+
+> 说明：`HandlerInfo` 的导出字段在近期修复中改名为 `HandlerReflectType`、`FlagSet`（原 `HandlerReflecType`、`FlagsSet`，均为拼写修正）。若你直接以结构体字面量构造 `HandlerInfo`，升级时需同步改名。
 
 ## 贡献
 如果您有任何建议、改进或发现了问题，请随时提交Issue或创建Pull Request。我们欢迎您的贡献！

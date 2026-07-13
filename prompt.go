@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,6 +35,8 @@ type PromptModel struct {
 	suggestIndex  int
 	suggestNum    int
 
+	termHeight int // last known terminal height, 0 until a WindowSizeMsg arrives
+
 	initCmds       []tea.Cmd
 	programOptions []tea.ProgramOption
 
@@ -57,7 +61,8 @@ type PromptModel struct {
 	saveHistory        bool
 	historyFile        string
 	historyChan        chan string
-	readyToSaveHistory bool
+	readyToSaveHistory atomic.Bool
+	historyDone        chan struct{} // closed when the history-writer goroutine exits
 
 	mutex sync.Mutex
 }
@@ -89,10 +94,9 @@ func NewPromptModel(opts ...PromptModelOption) *PromptModel {
 		withHelpMsg:  true,
 		printRunTime: true,
 
-		saveHistory:        true,
-		historyFile:        defaultHistoryFile,
-		historyChan:        make(chan string, 1000),
-		readyToSaveHistory: false,
+		saveHistory: true,
+		historyFile: defaultHistoryFile,
+		historyChan: make(chan string, 1000),
 
 		initFuncs: []PromptModelInitFunc{initTextModel, loadHistory, startSaveHistory},
 	}
@@ -118,6 +122,10 @@ func (m *PromptModel) init() {
 	}
 }
 
+// RegisterHandler registers handler under name. Invalid configuration (nil or
+// non-func handler, mismatched suggest count, unsupported param type, duplicate
+// name, invalid suggest text) is a setup-time programmer error and panics, like
+// regexp.MustCompile. Register all handlers before calling Run.
 func (m *PromptModel) RegisterHandler(handler Handler, name string, opts ...HandlerInfoOption) {
 	handlerInfos := NewHandlerInfo(name, handler, opts...)
 	m.RegisterHandlerInfos(handlerInfos)
@@ -145,7 +153,7 @@ func (m *PromptModel) runCmd(cmd string) tea.Cmd {
 		return nil
 	}
 	cmdWithTime := fmt.Sprintf("%s: %s", time.Now().Local().Format(timeFormat), cmd)
-	if m.readyToSaveHistory {
+	if m.readyToSaveHistory.Load() {
 		m.historyChan <- cmdWithTime + "\n"
 	}
 
@@ -172,6 +180,13 @@ func (m *PromptModel) getCurrentCmdString() string {
 	return strings.Join(strings.Fields(m.historyBuffers[m.historyIndex]), " ")
 }
 
+// syncBufferPos records the cursor position as a byte offset into the current
+// input buffer. bubbles reports the cursor as a rune index, but the suggestion
+// and completion logic slices the buffer by byte, so we convert here.
+func (m *PromptModel) syncBufferPos() {
+	m.historyBufferPos = runeIndexToByteOffset(m.textInput.Value(), m.textInput.Position())
+}
+
 func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd = nil
 	switch msg := msg.(type) {
@@ -183,7 +198,7 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			m.historyBuffers[m.historyIndex] = ""
 			m.textInput.SetValue("")
-			m.historyBufferPos = m.textInput.Position()
+			m.syncBufferPos()
 			return m, nil
 		case "ctrl+l":
 			return m, tea.ClearScreen
@@ -202,9 +217,9 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				fmt.Println(m.prefix + cmdString)
 			}
 			// reset text input
-			m.textInput.SetCursor(len(m.historyBuffers[m.historyIndex]))
 			m.textInput.SetValue(m.historyBuffers[m.historyIndex])
-			m.historyBufferPos = m.textInput.Position()
+			m.textInput.SetCursor(utf8.RuneCountInString(m.historyBuffers[m.historyIndex]))
+			m.syncBufferPos()
 			m.suggestIndex = -1
 			m.runCmdMark = true
 			return m, runCmd(cmdString)
@@ -216,8 +231,8 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyIndex = min(m.historyIndex+1, len(m.historys))
 			}
 			m.textInput.SetValue(m.historyBuffers[m.historyIndex])
-			m.textInput.SetCursor(len(m.historyBuffers[m.historyIndex]))
-			m.historyBufferPos = m.textInput.Position()
+			m.textInput.SetCursor(utf8.RuneCountInString(m.historyBuffers[m.historyIndex]))
+			m.syncBufferPos()
 			m.suggestIndex = -1
 			return m, nil
 		case "tab", "shift+tab":
@@ -234,14 +249,16 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.suggestIndex = (m.suggestIndex - 1) % len(m.matchSuggests)
 				}
 			}
-			// choise suggest, flush text input buffer
-			newCmd, _ := replaceScope(m.historyBuffers[m.historyIndex],
+			// Show the completed command, but keep historyBuffers[historyIndex]
+			// and historyBufferPos anchored to the user's typed prefix. That way
+			// updateSuggentList keeps regenerating the SAME candidate list from the
+			// prefix, so repeated tab cycles through all matches instead of
+			// collapsing onto the first one. The enter/default handlers re-sync the
+			// buffer from the shown value when the user commits or keeps typing.
+			newCmd, newPos := replaceScope(m.historyBuffers[m.historyIndex],
 				m.matchSuggests[m.suggestIndex].Text, m.historyBufferPos)
-			if m.historyBuffers[m.historyIndex] == m.textInput.Value() {
-				m.historyBufferPos = m.textInput.Position()
-			}
 			m.textInput.SetValue(newCmd)
-			m.textInput.SetCursor(len(newCmd))
+			m.textInput.SetCursor(byteOffsetToRuneIndex(newCmd, newPos))
 			return m, nil
 		default:
 			// input any key, need make sure text input buffer and current buffer is same
@@ -249,7 +266,7 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.suggestIndex = -1
 			m.textInput, cmd = m.textInput.Update(msg)
 			m.historyBuffers[m.historyIndex] = m.textInput.Value()
-			m.historyBufferPos = m.textInput.Position()
+			m.syncBufferPos()
 			return m, cmd
 		}
 	case RunCmdMsg:
@@ -262,7 +279,9 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runCmdMark = false
 		return m, cmd
 	case tea.WindowSizeMsg:
-		m.textInput.Width = msg.Width - len(m.prefix) - 1 // 防止显示不全。 -1是为了显示force光标
+		// use display width (cells), not byte length, so a multibyte prefix sizes correctly
+		m.textInput.Width = msg.Width - lipgloss.Width(m.prefix) - 1 // 防止显示不全。 -1是为了显示force光标
+		m.termHeight = msg.Height
 		return m, nil
 	}
 	return m, nil
@@ -294,7 +313,8 @@ func (m *PromptModel) SuggestView() string {
 		}
 		suggestView := getSuggestView(m.matchSuggests[index])
 		suggestViews = append(suggestViews, suggestView)
-		width = max(len(suggestView), width)
+		// display width (cells), so CJK suggestions are not over-padded
+		width = max(lipgloss.Width(suggestView), width)
 	}
 	m.forceStyle = m.forceStyle.Width(width)
 	m.baseStyle = m.baseStyle.Width(width)
@@ -320,7 +340,22 @@ func getSuggestView(s Suggest) string {
 
 func (m *Prompt) Run() error {
 	_, err := tea.NewProgram(m, m.programOptions...).Run()
+	// The bubbletea loop has stopped, so no more history entries will be sent.
+	// Close the channel and wait for the writer to drain any buffered entries
+	// before returning, so commands typed right before exit are not lost.
+	m.closeHistory()
 	return err
+}
+
+// closeHistory closes the history channel and waits for the writer goroutine to
+// flush remaining entries. It is a no-op when history saving is disabled.
+func (m *PromptModel) closeHistory() {
+	if m.historyDone == nil {
+		return
+	}
+	close(m.historyChan)
+	<-m.historyDone
+	m.historyDone = nil
 }
 
 func replaceScope(cmdString, newString string, pos int) (string, int) {
@@ -340,28 +375,69 @@ func replaceScope(cmdString, newString string, pos int) (string, int) {
 	return strings.Join(cmds, " "), newPos
 }
 
+// effectiveSuggestNum caps the number of visible suggestions so the input line,
+// suggestions, and help line together fit within the terminal height. It returns
+// suggestNum unchanged until a WindowSizeMsg has reported the height.
+func (m *PromptModel) effectiveSuggestNum() int {
+	if m.termHeight <= 0 {
+		return m.suggestNum
+	}
+	avail := m.termHeight - 1 // input line
+	if m.withHelpMsg {
+		avail-- // help line
+	}
+	if avail < 1 {
+		// degenerate tiny terminal: still show one suggestion
+		avail = 1
+	}
+	return min(m.suggestNum, avail)
+}
+
 // getSuggestScope >= start; < end
 func (m *PromptModel) getSuggestScope() (start, end int) {
+	suggestNum := m.effectiveSuggestNum()
 	start = m.suggestIndex
 	for ; start < len(m.matchSuggests); start++ {
 		if start >= 0 && start < len(m.matchSuggests) {
 			break
 		}
 	}
-	if start+m.suggestNum > len(m.matchSuggests)-1 {
-		start = max(len(m.matchSuggests)-m.suggestNum, 0)
+	if start+suggestNum > len(m.matchSuggests)-1 {
+		start = max(len(m.matchSuggests)-suggestNum, 0)
 	}
 
-	end = min(start+m.suggestNum, len(m.matchSuggests))
+	end = min(start+suggestNum, len(m.matchSuggests))
 	return
 }
 
+// SetHandlers replaces the whole handler set. It validates each handler like
+// registration does. Call it during setup, before Run: the bubbletea loop reads
+// the handler map without locking, so replacing it while the program is running
+// would race those reads.
 func (m *PromptModel) SetHandlers(handlers map[string]*HandlerInfo) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	// Validate and initialize each handler the same way registration does, so
+	// SetHandlers can't install handlers that would panic at run time.
+	for _, handlerInfo := range handlers {
+		if err := handlerInfo.CheckAndInitHandler(); err != nil {
+			panic(err)
+		}
+		if handlerInfo.Callback == nil {
+			handlerInfo.Callback = m.defaultCallback
+		}
+	}
 	m.handlerInfos = handlers
 }
 
 func (m *PromptModel) updateSuggentList() {
-	cmd := m.historyBuffers[m.historyIndex][:m.historyBufferPos]
+	buf := m.historyBuffers[m.historyIndex]
+	// defensive clamp: never slice past the buffer even if position desyncs
+	pos := m.historyBufferPos
+	if pos > len(buf) {
+		pos = len(buf)
+	}
+	cmd := buf[:pos]
 	if m.ignoreEmptyCmd && cmd == "" {
 		m.matchSuggests = make([]Suggest, 0)
 		return
@@ -373,6 +449,11 @@ func (m *PromptModel) updateSuggentList() {
 	handler, ok := m.handlerInfos[cmds[0]]
 	if !ok || len(cmds) == 1 {
 		m.genHandlerSuggests(cmds[0])
+	} else if !handler.UseFlagSet {
+		// WithoutFlagSet handlers take a raw argument string, not flags, so
+		// offering "-flag" param completions for them is meaningless.
+		m.matchSuggests = make([]Suggest, 0)
+		m.suggestIndex = -1
 	} else {
 		var matchSuggests []Suggest
 		var err error
@@ -380,7 +461,7 @@ func (m *PromptModel) updateSuggentList() {
 		if handler.GetSuggestMethod != nil {
 			getHandlerSuggests = handler.GetSuggestMethod
 		}
-		matchSuggests, err = getHandlerSuggests(handler, m.historyBuffers[m.historyIndex][:m.historyBufferPos])
+		matchSuggests, err = getHandlerSuggests(handler, buf[:pos])
 		if err != nil || matchSuggests == nil {
 			m.matchSuggests = make([]Suggest, 0)
 			m.suggestIndex = -1

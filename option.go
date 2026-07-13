@@ -3,7 +3,6 @@ package prompt
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -79,12 +78,17 @@ func WithDefaultHandlerCallback(callback HandlerCallback) PromptModelOption {
 	}
 }
 
+// WithSetTermValue sets the process TERM environment variable to
+// "xterm-256color" so lipgloss/termenv detect a 256-color profile. Note this
+// mutates the whole process environment, not just this prompt.
 func WithSetTermValue() PromptModelOption {
 	return func(pm *PromptModel) {
 		os.Setenv("TERM", "xterm-256color")
 	}
 }
 
+// WithOutFile tees stdout/stderr to outFile (the "Out" here means output, unlike
+// the WithOut*/Without* options which negate a feature).
 func WithOutFile(outFile string) PromptModelOption {
 	return func(pm *PromptModel) {
 		pm.outFile = outFile
@@ -106,11 +110,10 @@ func redirectStdout(m *PromptModel) error {
 	}
 
 	consoleOut := os.Stdout
-	out := io.MultiWriter(consoleOut, outputFile)
 
 	reader, writer, err := os.Pipe()
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("create stdout pipe fail, err: %v", err)
 	}
 	os.Stdout = writer
 	os.Stderr = writer
@@ -119,9 +122,11 @@ func redirectStdout(m *PromptModel) error {
 	outFileChan := make(chan []byte)
 
 	go func() {
-		defer consoleOut.Close()
-		for {
-			consoleOut.Write(<-consoleChan)
+		// Do NOT close consoleOut: it is the process's original os.Stdout, which
+		// the library did not open and must not close (doing so would break any
+		// later writes to fd 1 after the prompt shuts down).
+		for buffer := range consoleChan {
+			consoleOut.Write(buffer)
 		}
 	}()
 
@@ -137,21 +142,25 @@ func redirectStdout(m *PromptModel) error {
 
 	go func() {
 		defer reader.Close()
+		defer close(consoleChan)
+		defer close(outFileChan)
+		buf := make([]byte, 1024)
 		for {
-			buffer := make([]byte, 1024)
-			_, err := reader.Read(buffer[:])
-			if err != nil {
-				if err != io.EOF {
-					out.Write([]byte("read out put fail, err: " + err.Error()))
-				}
-				// no output, wait 1ms
-				time.Sleep(time.Millisecond)
-				continue
+			n, err := reader.Read(buf)
+			if n > 0 {
+				// Forward only the bytes actually read (not the whole 1024-byte
+				// buffer, which would append NUL padding). Copy because buf is
+				// reused on the next iteration and both consumers read concurrently.
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				consoleChan <- chunk
+				outFileChan <- chunk
 			}
-			consoleChan <- buffer
-			outFileChan <- buffer
+			if err != nil {
+				// EOF or a closed pipe on shutdown: stop instead of busy-looping.
+				return
+			}
 		}
-
 	}()
 	return nil
 }
@@ -210,7 +219,10 @@ func loadHistory(m *PromptModel) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return err
+		// History is best-effort: a corrupt or unreadable file must not crash
+		// construction. Warn and start with empty history instead.
+		fmt.Printf("load history file[%s] fail, err: %v\n", m.historyFile, err)
+		return nil
 	}
 	m.historyBuffers = make([]string, 0) // 清空历史记录
 	historys := strings.Split(string(data), "\n")
@@ -237,17 +249,21 @@ func startSaveHistory(m *PromptModel) error {
 	if !m.saveHistory || m.historyFile == "" {
 		return nil
 	}
+	m.historyDone = make(chan struct{})
 	go func(ch <-chan string) {
+		// Signal completion so closeHistory can wait for the final flush.
+		defer close(m.historyDone)
 		outputFile, err := os.OpenFile(m.historyFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
 		if err != nil {
-			fmt.Printf("open out file[%s] fail, err: %v\n", m.outFile, err)
+			fmt.Printf("open history file[%s] fail, err: %v\n", m.historyFile, err)
+			// Drain until the channel is closed so no sender ever blocks.
+			for range ch {
+			}
 			return
 		}
 		defer outputFile.Close()
-		m.readyToSaveHistory = true
-		defer func() {
-			m.readyToSaveHistory = false
-		}()
+		m.readyToSaveHistory.Store(true)
+		defer m.readyToSaveHistory.Store(false)
 		for cmd := range ch {
 			outputFile.Write([]byte(cmd))
 		}

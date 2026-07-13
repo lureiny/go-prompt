@@ -3,6 +3,7 @@ package prompt
 import (
 	"flag"
 	"fmt"
+	"io"
 	"reflect"
 	"strconv"
 	"strings"
@@ -15,17 +16,17 @@ type HandlerCallback func([]reflect.Value)
 type FlagSetInitFunc func(funcType reflect.Type) (*flag.FlagSet, []interface{}, error)
 
 type HandlerInfo struct {
-	Handler           Handler
-	HandlerReflecType reflect.Type
-	Callback          HandlerCallback
+	Handler            Handler
+	HandlerReflectType reflect.Type
+	Callback           HandlerCallback
 
 	Suggests         []Suggest // key = suggest text
 	SuggestPrefix    string
 	GetSuggestMethod GetSuggestFunc
 
-	Name     string
-	FlagsSet *flag.FlagSet
-	Params   []interface{}
+	Name    string
+	FlagSet *flag.FlagSet
+	Params  []interface{}
 
 	HelpMsg string
 
@@ -37,8 +38,8 @@ type HandlerInfo struct {
 
 func NewHandlerInfo(name string, handler Handler, opts ...HandlerInfoOption) *HandlerInfo {
 	h := &HandlerInfo{
-		Handler:           handler,
-		HandlerReflecType: reflect.TypeOf(handler),
+		Handler:            handler,
+		HandlerReflectType: reflect.TypeOf(handler),
 
 		Suggests:      make([]Suggest, 0),
 		SuggestPrefix: defaultSuggestPrefix,
@@ -61,14 +62,22 @@ func (h *HandlerInfo) InitParamsAndFlagSet() error {
 	}
 	var err error = nil
 	if h.FlagSetInitFuncImpl != nil {
-		h.FlagsSet, h.Params, err = h.FlagSetInitFuncImpl(h.HandlerReflecType)
+		h.FlagSet, h.Params, err = h.FlagSetInitFuncImpl(h.HandlerReflectType)
 		return err
 	}
-	h.FlagsSet = flag.NewFlagSet(h.Name, flag.ContinueOnError)
+	h.FlagSet = flag.NewFlagSet(h.Name, flag.ContinueOnError)
+	// Parse errors are returned to the caller; suppress the flag package's own
+	// error/usage dump so it doesn't race the bubbletea renderer or spam the TUI.
+	h.FlagSet.SetOutput(io.Discard)
 	h.Params = make([]interface{}, 0)
-	numIn := h.HandlerReflecType.NumIn()
+	numIn := h.HandlerReflectType.NumIn()
 	for i := 0; i < numIn; i++ {
-		v := h.HandlerReflecType.In(i)
+		v := h.HandlerReflectType.In(i)
+		if !isValidFlagName(h.Suggests[i].Text) {
+			return fmt.Errorf("handler[%s] suggest text[%q] is not a valid flag name "+
+				"(must be non-empty and contain no leading '-', '=' or spaces)",
+				h.Name, h.Suggests[i].Text)
+		}
 		if _, ok := isSupportType(v.String()); !ok {
 			return fmt.Errorf("handler[%s] the %d param of type[%s] is not support, need register first",
 				h.Name, i, v.String())
@@ -78,6 +87,19 @@ func (h *HandlerInfo) InitParamsAndFlagSet() error {
 		}
 	}
 	return nil
+}
+
+// isValidFlagName reports whether name can be registered as a stdlib flag. The
+// flag package panics if a name starts with '-' or contains '='; a space would
+// break command tokenization; an empty name is meaningless.
+func isValidFlagName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.HasPrefix(name, "-") {
+		return false
+	}
+	return !strings.ContainsAny(name, "= ")
 }
 
 func (h *HandlerInfo) Run(cmd string) (err error) {
@@ -90,24 +112,35 @@ func (h *HandlerInfo) Run(cmd string) (err error) {
 
 	args := []reflect.Value{}
 	if h.UseFlagSet {
+		// Rebuild the FlagSet with fresh default values before parsing, so values
+		// left over from a previous run (including one that failed to parse or
+		// whose handler panicked) never leak into this invocation.
+		if err = h.InitParamsAndFlagSet(); err != nil {
+			return
+		}
 		// parse param
-		if err = h.FlagsSet.Parse(strings.Split(cmd, " ")[1:]); err != nil {
+		if err = h.FlagSet.Parse(strings.Split(cmd, " ")[1:]); err != nil {
 			err = fmt.Errorf("can't parse handler[%s] args, err: %v", h.Name, err)
 			return
 		}
-		numIn := h.HandlerReflecType.NumIn()
+		numIn := h.HandlerReflectType.NumIn()
 		for i := 0; i < numIn; i++ {
-			v := h.HandlerReflecType.In(i)
+			v := h.HandlerReflectType.In(i)
 			args = append(args, convertParam(h.Params[i], v))
 		}
+	} else {
+		// WithoutFlagSet: func(string) handler receives the argument string —
+		// the command line with the leading handler name removed.
+		arg := ""
+		if parts := strings.SplitN(strings.TrimSpace(cmd), " ", 2); len(parts) == 2 {
+			arg = strings.TrimSpace(parts[1])
+		}
+		args = append(args, reflect.ValueOf(arg))
 	}
 
 	results := fn.Call(args)
 	if h.Callback != nil {
 		h.Callback(results)
-	}
-	if err := h.InitParamsAndFlagSet(); err != nil {
-		panic(err)
 	}
 	return
 }
@@ -116,22 +149,30 @@ func (h *HandlerInfo) CheckAndInitHandler() error {
 	if h.Name == "" {
 		return fmt.Errorf("handler name can't be empty")
 	}
-	if h.HandlerReflecType.Kind() != reflect.Func {
+	if h.Handler == nil {
+		return fmt.Errorf("handler[%s] func is nil", h.Name)
+	}
+	// Recover the reflect type for HandlerInfo values built as struct literals
+	// (bypassing NewHandlerInfo), so a nil HandlerReflectType doesn't panic below.
+	if h.HandlerReflectType == nil {
+		h.HandlerReflectType = reflect.TypeOf(h.Handler)
+	}
+	if h.HandlerReflectType.Kind() != reflect.Func {
 		return fmt.Errorf("handler[%s] is not func", h.Name)
 	}
 	if errMsg := checkSuggest(h.Suggests); errMsg != "" {
 		return fmt.Errorf("check suggest of handler[%s] fail, err: %s", h.Name, errMsg)
 	}
 	if !h.UseFlagSet {
-		if h.HandlerReflecType.NumIn() != 1 || h.HandlerReflecType.In(0).Kind() != reflect.String {
+		if h.HandlerReflectType.NumIn() != 1 || h.HandlerReflectType.In(0).Kind() != reflect.String {
 			return fmt.Errorf("handler[%s] not use flagset, should have 1 in param which type is string",
 				h.Name)
 		}
 		return nil
 	}
-	if h.HandlerReflecType.NumIn() != len(h.Suggests) {
+	if h.HandlerReflectType.NumIn() != len(h.Suggests) {
 		return fmt.Errorf("handler[%s] has %d in param, but suggest num is %d",
-			h.Name, h.HandlerReflecType.NumIn(), len(h.Suggests))
+			h.Name, h.HandlerReflectType.NumIn(), len(h.Suggests))
 	}
 	if err := h.InitParamsAndFlagSet(); err != nil {
 		return err
@@ -162,22 +203,22 @@ func initIterfaceParams(suggest *Suggest, valueType reflect.Type, h *HandlerInfo
 	} else {
 		defaultType := reflect.TypeOf(suggest.Default)
 		if defaultType.String() != valueType.String() {
-			return fmt.Errorf("default value type[%s] is defferrnt with in param type[%s]",
+			return fmt.Errorf("default value type[%s] is different from in param type[%s]",
 				defaultType.String(), valueType.String())
 		}
 	}
 	var param interface{} = nil
 	switch valueType.String() {
 	case "string":
-		param = h.FlagsSet.String(suggest.Text, suggest.Default.(string), suggest.Description)
+		param = h.FlagSet.String(suggest.Text, suggest.Default.(string), suggest.Description)
 	case "int", "int8", "int16", "int32", "int64":
-		param = h.FlagsSet.Int64(suggest.Text, intxToInt64(suggest.Default), suggest.Description)
+		param = h.FlagSet.Int64(suggest.Text, intxToInt64(suggest.Default), suggest.Description)
 	case "float64", "float32":
-		param = h.FlagsSet.Float64(suggest.Text, floatxToFloat64(suggest.Default), suggest.Description)
+		param = h.FlagSet.Float64(suggest.Text, floatxToFloat64(suggest.Default), suggest.Description)
 	case "bool":
-		param = h.FlagsSet.Bool(suggest.Text, suggest.Default.(bool), suggest.Description)
+		param = h.FlagSet.Bool(suggest.Text, suggest.Default.(bool), suggest.Description)
 	case "uint", "uint8", "uint16", "uint32", "uint64":
-		param = h.FlagsSet.Uint64(suggest.Text, uintxToUint64(suggest.Default), suggest.Description)
+		param = h.FlagSet.Uint64(suggest.Text, uintxToUint64(suggest.Default), suggest.Description)
 	default:
 		return fmt.Errorf("value type[%s] is not support by flag set", valueType.String())
 	}

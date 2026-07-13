@@ -13,7 +13,7 @@ var (
 				Background(lipgloss.Color("#00B3FF73")).
 				Foreground(lipgloss.Color("#00B3FFFF"))
 
-	defaultForceStyle = defaultBaseStyle.Copy().
+	defaultForceStyle = defaultBaseStyle.
 				Underline(true).
 				Italic(true).
 				Background(lipgloss.Color("#9EA9AEFF"))

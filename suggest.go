@@ -18,15 +18,11 @@ type Suggest struct {
 }
 
 func SortSuggest(suggests []Suggest) []Suggest {
-	suggestTextMap := make(map[string]Suggest)
-	suggestTexts := make([]string, len(suggests))
-	for index, s := range suggests {
-		suggestTextMap[s.Text] = s
-		suggestTexts[index] = s.Text
-	}
-	sort.Strings(suggestTexts)
-	for index, text := range suggestTexts {
-		suggests[index] = suggestTextMap[text]
-	}
+	// Sort in place by Text. A previous map-based implementation silently
+	// dropped/duplicated entries whose Text collided; sorting the slice
+	// directly preserves every element.
+	sort.SliceStable(suggests, func(i, j int) bool {
+		return suggests[i].Text < suggests[j].Text
+	})
 	return suggests
 }

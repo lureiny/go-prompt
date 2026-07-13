@@ -5,30 +5,63 @@ import (
 	"math"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 )
 
+// IsMatch reports whether input is an in-order subsequence of suggest
+// (case-insensitive), skipping '-' in input. It compares whole runes, so
+// multibyte (e.g. Chinese) handler and suggest names match correctly.
 func IsMatch(input, suggest string) bool {
-	index := 0
 	input = strings.ToLower(input)
-	suggest = strings.ToLower(suggest)
+	suggestRunes := []rune(strings.ToLower(suggest))
 
+	index := 0
 	for _, c := range input {
 		if c == '-' {
 			continue
 		}
-
-		if index == len(suggest) {
+		found := false
+		for index < len(suggestRunes) {
+			r := suggestRunes[index]
+			index++
+			if r == c {
+				found = true
+				break
+			}
+		}
+		if !found {
 			return false
 		}
-
-		i := strings.IndexByte(suggest[index:], byte(c)) // 使用 strings.IndexByte 查找字符
-		if i == -1 {
-			return false
-		}
-		index += i + 1 // 更新 index
 	}
-
 	return true
+}
+
+// runeIndexToByteOffset converts a rune index (as reported by bubbles
+// textinput.Position) into a byte offset into s (as used for slicing s).
+func runeIndexToByteOffset(s string, runeIndex int) int {
+	if runeIndex <= 0 {
+		return 0
+	}
+	n := 0
+	for i := range s {
+		if n == runeIndex {
+			return i
+		}
+		n++
+	}
+	return len(s)
+}
+
+// byteOffsetToRuneIndex converts a byte offset into s into a rune index
+// (as expected by bubbles textinput.SetCursor).
+func byteOffsetToRuneIndex(s string, byteOffset int) int {
+	if byteOffset <= 0 {
+		return 0
+	}
+	if byteOffset >= len(s) {
+		return utf8.RuneCountInString(s)
+	}
+	return utf8.RuneCountInString(s[:byteOffset])
 }
 
 type GetSuggestFunc func(h *HandlerInfo, input string) ([]Suggest, error)
@@ -86,7 +119,7 @@ func max(a, b int) int {
 	return b
 }
 
-const helpMsg = "ctrl+d: exit; tab, shift+tab choise suggest; ↑↓ choise history cmd"
+const helpMsg = "ctrl+d: exit; tab, shift+tab choose suggest; ↑↓ choose history cmd"
 
 func HelpView() string {
 	return helpStyle(helpMsg)
@@ -96,7 +129,9 @@ func IsBoolSuggest(suggests []Suggest, input, suggestPrefix string) bool {
 	for _, s := range suggests {
 		prefix := suggestPrefix + s.Text + "="
 		if strings.Contains(input, prefix) {
-			return reflect.TypeOf(s.Default).String() == reflect.TypeOf(true).String()
+			// nil-safe: a nil or non-bool Default yields false rather than panicking
+			_, isBool := s.Default.(bool)
+			return isBool
 		}
 	}
 	return false
@@ -255,7 +290,9 @@ func float64ToFloatx(src interface{}, dst reflect.Type) interface{} {
 
 	switch dst.String() {
 	case "float32":
-		if srcData > math.MaxFloat32 {
+		// check magnitude on both sides: a large negative also overflows float32
+		// (silently becoming -Inf) just as a large positive does.
+		if math.Abs(srcData) > math.MaxFloat32 {
 			panic(fmt.Sprintf(rangeOutString, srcData, dst.String()))
 		}
 		return float32(srcData)
