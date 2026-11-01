@@ -1,508 +1,661 @@
+// Package prompt builds interactive command-line REPLs on Bubble Tea.
+//
+//	p := prompt.New(prompt.WithPrefix(">>> "))
+//	p.Command("calc", "add two numbers", func(a, b int) int { return a + b },
+//		prompt.Flag("a", "first number"), prompt.Flag("b", "second number"))
+//	if err := p.Run(); err != nil { ... }
+//
+// Typing "calc -a 1 -b 2" prints 3. Commands get tab completion for their
+// names and flags, "-h" usage, history (↑/↓, saved across runs), and "help"
+// and "exit" built-ins.
 package prompt
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
-type PromptModelInitFunc func(*PromptModel) error
+const (
+	timeFormat = "2006-01-02 15:04:05.000" // history line prefix: "<time>: <cmd>"
 
-type PromptModel struct {
-	prefix          string
-	handlerInfos    map[string]*HandlerInfo
-	defaultCallback HandlerCallback
-	historys        []string
-	historyBuffers  []string
-	historyIndex    int
+	defaultPrefix         = ">>> "
+	defaultMaxSuggestions = 3
+	// runDelay lets the blank "running" frame render before a command's
+	// output starts.
+	runDelay = 20 * time.Millisecond
 
+	helpLineText = "tab/shift+tab: complete · ↑↓: history · ctrl+c: clear/interrupt · ctrl+d: exit"
+)
+
+// Prompt is an interactive command prompt. Create it with New, add commands
+// with Command and RawCommand, then call Run. It implements tea.Model.
+type Prompt struct {
+	prefix   string
+	commands map[string]*command
+	builtins map[string]*command // help, exit; user commands take precedence
+
+	historys       []string // committed command lines, oldest first
+	historyBuffers []string // per-entry edit buffers; len(historys)+1, last is the live line
+	historyIndex   int
+	// cursor position as a byte offset into historyBuffers[historyIndex]
 	historyBufferPos int
-	// historyOuts    []string // save history out info
-
-	printCmd       bool
-	ignoreEmptyCmd bool
 
 	textInput textinput.Model
 
-	matchSuggests []Suggest
-	suggestIndex  int
-	suggestNum    int
+	matchSuggests  []Suggestion
+	suggestIndex   int
+	maxSuggestions int
+	suggestOnEmpty bool
 
 	termHeight int // last known terminal height, 0 until a WindowSizeMsg arrives
 
 	initCmds       []tea.Cmd
 	programOptions []tea.ProgramOption
 
-	initFuncs []PromptModelInitFunc
+	styles   Styles
+	helpLine bool
+	echo     bool
+	echoTime bool
 
-	forceStyle lipgloss.Style
-	baseStyle  lipgloss.Style
+	resultHandler func(results []any)
 
-	runCmdMark  bool
-	runCmdDeply int64 // ms
-
-	outFile     string
-	filterAscii bool // filter invisible characters in ascii
+	// set while a command runs in the background (between runCmdMsg and
+	// cmdDoneMsg); only touched from Update
+	runCmdMark bool
+	cancelRun  context.CancelFunc
+	running    *command
 
 	exit bool
 
-	withHelpMsg bool
-
-	printRunTime bool
+	// log file (WithLogFile)
+	outFile       string
+	plainLog      bool
+	programOutput io.Writer // bubbletea output override while logging
+	restoreStdout func()    // undoes the stdout redirect, flushing the pipe
 
 	// history
 	saveHistory        bool
-	historyFile        string
+	historyFile        string // "" = default location, resolved by start
+	appName            string
 	historyChan        chan string
 	readyToSaveHistory atomic.Bool
-	historyDone        chan struct{} // closed when the history-writer goroutine exits
+	historyDone        chan struct{} // closed when the history writer exits
 
-	mutex sync.Mutex
+	started bool
 }
 
-type Prompt struct {
-	*PromptModel
-}
-
-func NewPrompt(opts ...PromptModelOption) *Prompt {
+// New creates a prompt. It has no side effects: history is loaded, and the
+// log file opened, when Run starts.
+func New(opts ...Option) *Prompt {
 	p := &Prompt{
-		NewPromptModel(opts...),
+		prefix:         defaultPrefix,
+		commands:       map[string]*command{},
+		historyBuffers: make([]string, 1),
+		suggestIndex:   -1,
+		maxSuggestions: defaultMaxSuggestions,
+		suggestOnEmpty: true,
+		styles:         DefaultStyles(),
+		helpLine:       true,
+		echo:           true,
+		resultHandler:  printResults,
+		saveHistory:    true,
+		historyChan:    make(chan string, 1000),
 	}
+	p.builtins = p.builtinCommands()
+	for _, opt := range opts {
+		opt(p)
+	}
+	p.textInput = textinput.New()
+	p.textInput.Focus()
+	p.textInput.Prompt = p.prefix
 	return p
 }
 
-func NewPromptModel(opts ...PromptModelOption) *PromptModel {
-	model := &PromptModel{
-		handlerInfos:   map[string]*HandlerInfo{},
-		prefix:         defaultPrefix,
-		historyBuffers: make([]string, 1),
-		suggestIndex:   -1,
-		suggestNum:     defaultSuggestNum,
-		forceStyle:     defaultForceStyle,
-		baseStyle:      defaultBaseStyle,
+// printResults is the default result handler: it prints the command
+// function's return values on one line.
+func printResults(results []any) { fmt.Println(results...) }
 
-		runCmdDeply: defaultRunCmdDeply,
-		printCmd:    defaultPrintCmd,
-
-		withHelpMsg:  true,
-		printRunTime: true,
-
-		saveHistory: true,
-		historyFile: defaultHistoryFile,
-		historyChan: make(chan string, 1000),
-
-		initFuncs: []PromptModelInitFunc{initTextModel, loadHistory, startSaveHistory},
-	}
-	for _, opt := range opts {
-		opt(model)
-	}
-	model.init()
-	return model
+// Command registers a command whose arguments are flags (-name value). fn is
+// a function of one of these forms, optionally with a leading
+// context.Context (cancelled when the user presses ctrl+c while it runs):
+//
+//	func()
+//	func(args Args)          // or *Args: struct fields are the flags
+//	func(a T1, b T2, ...)    // one Flag(...) option per parameter, in order
+//
+// Struct fields are configured with tags:
+//
+//	type Args struct {
+//		Name  string        `help:"who to greet" default:"world"`
+//		Times int           `flag:"n" help:"repeat count" default:"1"`
+//		Wait  time.Duration `default:"1s"`
+//	}
+//
+// The flag name defaults to the field name in kebab-case; flag:"-" skips a
+// field. Supported types are strings, bools, all int/uint/float sizes,
+// time.Duration, and types implementing flag.Value or
+// encoding.TextUnmarshaler.
+//
+// fn may return any values. A final error is reported as a failure; other
+// results go to the result handler (printed by default, see
+// WithResultHandler and OnResult).
+//
+// Invalid registrations (bad signature, duplicate name, ...) are programmer
+// errors and panic, so register all commands before Run.
+func (p *Prompt) Command(name, help string, fn any, opts ...CommandOption) {
+	p.add(name, help, fn, false, opts)
 }
 
-func initTextModel(m *PromptModel) error {
-	m.textInput = textinput.New()
-	m.textInput.Focus()
-	m.textInput.Prompt = m.prefix
+// RawCommand registers a command that receives its arguments unparsed: fn is
+// func(args string) or func(ctx context.Context, args string), and args is
+// the line after the command name, trimmed. Use it for free-form input.
+func (p *Prompt) RawCommand(name, help string, fn any, opts ...CommandOption) {
+	p.add(name, help, fn, true, opts)
+}
+
+func (p *Prompt) add(name, help string, fn any, raw bool, opts []CommandOption) {
+	c, err := newCommand(name, help, fn, raw, opts)
+	if err != nil {
+		panic("prompt: " + err.Error())
+	}
+	if _, dup := p.commands[name]; dup {
+		panic(fmt.Sprintf("prompt: command[%s] is already registered", name))
+	}
+	p.commands[name] = c
+}
+
+// lookup returns the command called name, or nil.
+func (p *Prompt) lookup(name string) *command {
+	if c, ok := p.commands[name]; ok {
+		return c
+	}
+	return p.builtins[name]
+}
+
+// commandNames lists user and built-in command names (unsorted).
+func (p *Prompt) commandNames() []string {
+	names := make([]string, 0, len(p.commands)+len(p.builtins))
+	for n := range p.commands {
+		names = append(names, n)
+	}
+	for n := range p.builtins {
+		if _, shadowed := p.commands[n]; !shadowed {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+// Run starts the prompt and blocks until the user exits. It loads and saves
+// history, applies WithLogFile, and restores the terminal and stdout before
+// returning.
+func (p *Prompt) Run() error {
+	if err := p.start(); err != nil {
+		return err
+	}
+	defer p.stop()
+	opts := p.programOptions
+	if p.programOutput != nil {
+		// put ours first so a user-supplied tea.WithOutput still wins
+		opts = append([]tea.ProgramOption{tea.WithOutput(p.programOutput)}, opts...)
+	}
+	_, err := tea.NewProgram(p, opts...).Run()
+	return err
+}
+
+// start performs Run's side effects: loading history, starting the history
+// writer, and redirecting stdout for WithLogFile.
+func (p *Prompt) start() error {
+	if p.started {
+		return nil
+	}
+	p.started = true
+	if p.saveHistory {
+		if p.historyFile == "" {
+			p.historyFile = defaultHistoryPath(p.appName)
+		}
+		p.loadHistory()
+		p.startSaveHistory()
+	}
+	if p.outFile != "" {
+		if err := p.redirectStdout(); err != nil {
+			p.stop()
+			return err
+		}
+	}
 	return nil
 }
 
-func (m *PromptModel) init() {
-	for _, initFunc := range m.initFuncs {
-		if err := initFunc(m); err != nil {
-			panic(err)
-		}
+// stop undoes start: it flushes history and the log, and restores stdout.
+func (p *Prompt) stop() {
+	p.closeHistory()
+	if p.restoreStdout != nil {
+		p.restoreStdout()
+		p.restoreStdout = nil
 	}
 }
 
-// RegisterHandler registers handler under name. Invalid configuration (nil or
-// non-func handler, mismatched suggest count, unsupported param type, duplicate
-// name, invalid suggest text) is a setup-time programmer error and panics, like
-// regexp.MustCompile. Register all handlers before calling Run.
-func (m *PromptModel) RegisterHandler(handler Handler, name string, opts ...HandlerInfoOption) {
-	handlerInfos := NewHandlerInfo(name, handler, opts...)
-	m.RegisterHandlerInfos(handlerInfos)
+// closeHistory closes the history channel and waits for the writer goroutine
+// to flush remaining entries. It is a no-op when history saving is off.
+func (p *Prompt) closeHistory() {
+	if p.historyDone == nil {
+		return
+	}
+	close(p.historyChan)
+	<-p.historyDone
+	p.historyDone = nil
 }
 
-func (m *PromptModel) RegisterHandlerInfos(handlerInfos ...*HandlerInfo) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	for _, handlerInfo := range handlerInfos {
-		if err := handlerInfo.CheckAndInitHandler(); err != nil {
-			panic(err)
-		}
-		if handlerInfo.Callback == nil {
-			handlerInfo.Callback = m.defaultCallback
-		}
-		if _, ok := m.handlerInfos[handlerInfo.Name]; ok {
-			panic(fmt.Errorf("handler[%s] has been registered", handlerInfo.Name))
-		}
-		m.handlerInfos[handlerInfo.Name] = handlerInfo
-	}
+// cmdResult is the outcome of running one command line.
+type cmdResult struct {
+	name string
+	cmd  *command // nil if no command has that name
+	err  error
 }
 
-func (m *PromptModel) runCmd(cmd string) tea.Cmd {
-	if len(strings.ReplaceAll(cmd, " ", "")) == 0 {
-		return nil
+// execCmd runs one command line and reports the outcome without touching the
+// model, so it is safe to call from the background goroutine of a tea.Cmd.
+func (p *Prompt) execCmd(ctx context.Context, line string) cmdResult {
+	r := cmdResult{}
+	if tokens := tokenize(line); len(tokens) > 0 {
+		r.name = tokens[0].Text
 	}
-	cmdWithTime := fmt.Sprintf("%s: %s", time.Now().Local().Format(timeFormat), cmd)
-	if m.readyToSaveHistory.Load() {
-		m.historyChan <- cmdWithTime + "\n"
+	r.cmd = p.lookup(r.name)
+	if r.cmd != nil {
+		r.err = r.cmd.run(ctx, line, p.resultHandler)
 	}
+	return r
+}
 
-	handlerName := strings.Split(cmd, " ")[0]
-	handler, ok := m.handlerInfos[handlerName]
-	if !ok {
-		return tea.Printf("can't find handler[%s]", handlerName)
-	}
-	if err := handler.Run(cmd); err != nil {
-		return tea.Printf("run cmd of handler[%s] fail, err: %v", handlerName, err)
-	}
-	if handler.ExitAfterRun {
-		m.exit = true
+// finishCmd applies a command's outcome to the model (called from Update)
+// and returns what to print, or tea.Quit for an Exit command.
+func (p *Prompt) finishCmd(r cmdResult) tea.Cmd {
+	switch {
+	case r.cmd == nil:
+		return tea.Printf(`unknown command %q (type "help" to list commands)`, r.name)
+	case r.err != nil:
+		if usage, ok := isUsage(r.err); ok {
+			return tea.Println(usage)
+		}
+		if errors.Is(r.err, context.Canceled) {
+			return tea.Printf("%s: interrupted", r.name)
+		}
+		return tea.Printf("%s: %v", r.name, r.err)
+	case r.cmd.exitAfter:
+		p.exit = true
 		return tea.Quit
 	}
 	return nil
 }
 
-func (m *PromptModel) Init() tea.Cmd {
-	return tea.Batch(m.initCmds...)
+// saveHistoryEntry queues line for the history file.
+func (p *Prompt) saveHistoryEntry(line string) {
+	if p.readyToSaveHistory.Load() {
+		p.historyChan <- fmt.Sprintf("%s: %s\n", time.Now().Local().Format(timeFormat), line)
+	}
 }
 
-func (m *PromptModel) getCurrentCmdString() string {
-	// Split only on the ASCII space, matching the suggestion and flag-parse paths
-	// (which use strings.Split on " "). strings.Fields would additionally split on
-	// Unicode whitespace such as the full-width space U+3000 that CJK IMEs emit in
-	// full-width mode, silently rewriting it to an ASCII space and corrupting the
-	// argument/flag value and the saved history. Treat U+3000 as a normal
-	// character (like a shell does), so tokenization is consistent everywhere.
-	fields := strings.FieldsFunc(m.historyBuffers[m.historyIndex], func(r rune) bool {
-		return r == ' '
-	})
-	return strings.Join(fields, " ")
+// runCmd runs line synchronously (saving it to history) and returns the
+// follow-up command. The interactive loop runs commands asynchronously via
+// runCmdMsg instead; this is the blocking equivalent.
+func (p *Prompt) runCmd(line string) tea.Cmd {
+	if strings.TrimSpace(line) == "" {
+		return nil
+	}
+	p.saveHistoryEntry(line)
+	return p.finishCmd(p.execCmd(context.Background(), line))
+}
+
+// Init implements tea.Model.
+func (p *Prompt) Init() tea.Cmd {
+	return tea.Batch(p.initCmds...)
+}
+
+// getCurrentCmdString normalizes the committed line: words (as tokenize sees
+// them, so quoted spaces stay inside their word) joined by single spaces.
+// Full-width spaces are separators too; typed input is already normalized by
+// normalizeFullWidthSpace, this covers e.g. history from older versions.
+func (p *Prompt) getCurrentCmdString() string {
+	line := strings.ReplaceAll(p.historyBuffers[p.historyIndex], string(fullWidthSpace), " ")
+	tokens := tokenize(line)
+	words := make([]string, len(tokens))
+	for i, t := range tokens {
+		words[i] = line[t.Start:t.End]
+	}
+	return strings.Join(words, " ")
+}
+
+// fullWidthSpace is U+3000, which CJK IMEs emit for the space bar in
+// full-width mode.
+const fullWidthSpace = '\u3000'
+
+// normalizeFullWidthSpace rewrites full-width spaces in the text input to
+// ASCII spaces, so an IME left in full-width mode still separates the command
+// name, flags and values. Both are a single rune, so the rune cursor position
+// is unchanged; callers re-derive the byte offset via syncBufferPos.
+func (p *Prompt) normalizeFullWidthSpace() {
+	v := p.textInput.Value()
+	if !strings.ContainsRune(v, fullWidthSpace) {
+		return
+	}
+	pos := p.textInput.Position()
+	p.textInput.SetValue(strings.ReplaceAll(v, string(fullWidthSpace), " "))
+	p.textInput.SetCursor(pos)
 }
 
 // syncBufferPos records the cursor position as a byte offset into the current
 // input buffer. bubbles reports the cursor as a rune index, but the suggestion
 // and completion logic slices the buffer by byte, so we convert here.
-func (m *PromptModel) syncBufferPos() {
-	m.historyBufferPos = runeIndexToByteOffset(m.textInput.Value(), m.textInput.Position())
+func (p *Prompt) syncBufferPos() {
+	p.historyBufferPos = runeIndexToByteOffset(p.textInput.Value(), p.textInput.Position())
 }
 
-func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd = nil
+// runCmdMsg asks Update to run a committed command line.
+type runCmdMsg struct{ line string }
+
+// cmdDoneMsg reports that a background command finished.
+type cmdDoneMsg struct{ result cmdResult }
+
+// Update implements tea.Model.
+func (p *Prompt) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.PasteMsg:
+		if p.runCmdMark {
+			return p, nil // a command is running; input is ignored
+		}
+		// bubbletea v2 delivers bracketed paste as its own message. Forward
+		// it to the text input AND re-sync the command buffer; otherwise
+		// pasted text is shown but never reaches the command.
+		p.suggestIndex = -1
+		p.textInput, cmd = p.textInput.Update(msg)
+		p.normalizeFullWidthSpace()
+		p.historyBuffers[p.historyIndex] = p.textInput.Value()
+		p.syncBufferPos()
+		return p, cmd
+	case tea.KeyPressMsg:
+		if p.runCmdMark {
+			return p.updateWhileRunning(msg)
+		}
 		switch keypress := msg.String(); keypress {
 		case "ctrl+d":
-			m.exit = true
-			return m, tea.Quit
+			p.exit = true
+			return p, tea.Quit
 		case "ctrl+c":
-			m.historyBuffers[m.historyIndex] = ""
-			m.textInput.SetValue("")
-			m.syncBufferPos()
-			return m, nil
+			p.suggestIndex = -1
+			p.historyBuffers[p.historyIndex] = ""
+			p.textInput.SetValue("")
+			p.syncBufferPos()
+			return p, nil
 		case "ctrl+l":
-			return m, tea.ClearScreen
+			return p, tea.ClearScreen
 		case "enter":
-			m.historyBuffers[m.historyIndex] = m.textInput.Value()
-			cmdString := m.getCurrentCmdString()
-			if len(strings.ReplaceAll(cmdString, " ", "")) > 0 &&
-				(len(m.historys) == 0 || cmdString != m.historys[len(m.historys)-1]) {
-				m.historys = append(m.historys, cmdString)
+			p.historyBuffers[p.historyIndex] = p.textInput.Value()
+			line := p.getCurrentCmdString()
+			if line != "" && (len(p.historys) == 0 || line != p.historys[len(p.historys)-1]) {
+				p.historys = append(p.historys, line)
 			}
-			m.historyIndex = len(m.historys)
-			m.historyBuffers = make([]string, len(m.historys)+1)
-			copy(m.historyBuffers, m.historys)
-			if m.printCmd {
-				// 覆盖刷新
-				fmt.Println(m.prefix + cmdString)
-			}
-			// reset text input
-			m.textInput.SetValue(m.historyBuffers[m.historyIndex])
-			m.textInput.SetCursor(utf8.RuneCountInString(m.historyBuffers[m.historyIndex]))
-			m.syncBufferPos()
-			m.suggestIndex = -1
-			m.runCmdMark = true
-			return m, runCmd(cmdString)
-		case "up", "down", "ctrl+p", "ctrl+n":
-			switch msg.String() {
-			case "up", "ctrl+p":
-				m.historyIndex = max(0, m.historyIndex-1)
-			case "down", "ctrl+n":
-				m.historyIndex = min(m.historyIndex+1, len(m.historys))
-			}
-			m.textInput.SetValue(m.historyBuffers[m.historyIndex])
-			m.textInput.SetCursor(utf8.RuneCountInString(m.historyBuffers[m.historyIndex]))
-			m.syncBufferPos()
-			m.suggestIndex = -1
-			return m, nil
-		case "tab", "shift+tab":
-			if len(m.matchSuggests) == 0 {
-				return m, nil
-			}
-			switch keypress {
-			case "tab":
-				m.suggestIndex = (m.suggestIndex + 1) % len(m.matchSuggests)
-			case "shift+tab":
-				if m.suggestIndex <= 0 {
-					m.suggestIndex = len(m.matchSuggests) - 1
-				} else {
-					m.suggestIndex = (m.suggestIndex - 1) % len(m.matchSuggests)
+			p.historyIndex = len(p.historys)
+			p.historyBuffers = make([]string, len(p.historys)+1)
+			copy(p.historyBuffers, p.historys)
+			if p.echo {
+				echo := p.prefix + line
+				if p.echoTime {
+					echo = time.Now().Local().Format(timeFormat) + " " + echo
 				}
+				fmt.Println(echo)
 			}
-			// Show the completed command, but keep historyBuffers[historyIndex]
-			// and historyBufferPos anchored to the user's typed prefix. That way
-			// updateSuggentList keeps regenerating the SAME candidate list from the
-			// prefix, so repeated tab cycles through all matches instead of
-			// collapsing onto the first one. The enter/default handlers re-sync the
-			// buffer from the shown value when the user commits or keeps typing.
-			newCmd, newPos := replaceScope(m.historyBuffers[m.historyIndex],
-				m.matchSuggests[m.suggestIndex].Text, m.historyBufferPos)
-			m.textInput.SetValue(newCmd)
-			m.textInput.SetCursor(byteOffsetToRuneIndex(newCmd, newPos))
-			return m, nil
+			p.textInput.SetValue("")
+			p.syncBufferPos()
+			p.suggestIndex = -1
+			p.runCmdMark = true
+			return p, func() tea.Msg { return runCmdMsg{line: line} }
+		case "up", "down", "ctrl+p", "ctrl+n":
+			switch keypress {
+			case "up", "ctrl+p":
+				p.historyIndex = max(0, p.historyIndex-1)
+			case "down", "ctrl+n":
+				p.historyIndex = min(p.historyIndex+1, len(p.historys))
+			}
+			p.textInput.SetValue(p.historyBuffers[p.historyIndex])
+			p.textInput.SetCursor(utf8.RuneCountInString(p.historyBuffers[p.historyIndex]))
+			p.syncBufferPos()
+			p.suggestIndex = -1
+			return p, nil
+		case "tab", "shift+tab":
+			if len(p.matchSuggests) == 0 {
+				return p, nil
+			}
+			if keypress == "tab" {
+				p.suggestIndex = (p.suggestIndex + 1) % len(p.matchSuggests)
+			} else if p.suggestIndex <= 0 {
+				p.suggestIndex = len(p.matchSuggests) - 1
+			} else {
+				p.suggestIndex--
+			}
+			// Show the completed line, but keep historyBuffers[historyIndex]
+			// and historyBufferPos anchored to the typed prefix, so the same
+			// candidate list keeps being generated and repeated tabs cycle
+			// through all matches. enter/typing re-sync from the shown value.
+			newLine, newPos := replaceScope(p.historyBuffers[p.historyIndex],
+				p.matchSuggests[p.suggestIndex].Text, p.historyBufferPos)
+			p.textInput.SetValue(newLine)
+			p.textInput.SetCursor(byteOffsetToRuneIndex(newLine, newPos))
+			return p, nil
 		default:
-			// input any key, need make sure text input buffer and current buffer is same
-			// reset suggest index
-			m.suggestIndex = -1
-			m.textInput, cmd = m.textInput.Update(msg)
-			m.historyBuffers[m.historyIndex] = m.textInput.Value()
-			m.syncBufferPos()
-			return m, cmd
+			p.suggestIndex = -1
+			p.textInput, cmd = p.textInput.Update(msg)
+			p.normalizeFullWidthSpace()
+			p.historyBuffers[p.historyIndex] = p.textInput.Value()
+			p.syncBufferPos()
+			return p, cmd
 		}
-	case RunCmdMsg:
-		cmdWithTime := fmt.Sprintf("%s: %s", time.Now().Local().Format(timeFormat), msg.cmd)
-		if !m.printCmd && m.printRunTime {
-			fmt.Println(cmdWithTime)
+	case runCmdMsg:
+		if strings.TrimSpace(msg.line) == "" {
+			p.runCmdMark = false
+			return p, nil
 		}
-		time.Sleep(time.Duration(m.runCmdDeply * int64(time.Millisecond)))
-		cmd := m.runCmd(msg.cmd)
-		m.runCmdMark = false
-		return m, cmd
+		p.saveHistoryEntry(msg.line)
+		// Run the command in the background so the event loop stays
+		// responsive: ctrl+c cancels a command that takes a context.Context,
+		// ctrl+d quits. View stays blank (runCmdMark) until cmdDoneMsg, so
+		// command output isn't mixed with the input line.
+		ctx, cancel := context.WithCancel(context.Background())
+		p.cancelRun = cancel
+		p.running = p.lookupLine(msg.line)
+		line := msg.line
+		return p, func() tea.Msg {
+			time.Sleep(runDelay)
+			return cmdDoneMsg{p.execCmd(ctx, line)}
+		}
+	case cmdDoneMsg:
+		if p.cancelRun != nil {
+			p.cancelRun()
+		}
+		p.cancelRun, p.running = nil, nil
+		p.runCmdMark = false
+		return p, p.finishCmd(msg.result)
 	case tea.WindowSizeMsg:
-		// use display width (cells), not byte length, so a multibyte prefix sizes correctly
-		m.textInput.Width = msg.Width - lipgloss.Width(m.prefix) - 1 // 防止显示不全。 -1是为了显示force光标
-		m.termHeight = msg.Height
-		return m, nil
+		// display width (cells), not bytes, so a multibyte prefix sizes
+		// correctly; -1 leaves room for the cursor
+		p.textInput.SetWidth(msg.Width - lipgloss.Width(p.prefix) - 1)
+		p.termHeight = msg.Height
+		return p, nil
 	}
-	return m, nil
+	return p, nil
 }
 
-func (m *PromptModel) View() string {
-	if m.runCmdMark || m.exit {
-		return m.prefix
+// lookupLine returns the command line would dispatch to, or nil.
+func (p *Prompt) lookupLine(line string) *command {
+	if tokens := tokenize(line); len(tokens) > 0 {
+		return p.lookup(tokens[0].Text)
 	}
-	m.updateSuggentList()
-	s := m.textInput.View()
-	if m.SuggestView() != "" {
-		s += "\n" + m.SuggestView()
+	return nil
+}
+
+// updateWhileRunning handles keys while a command runs: ctrl+c interrupts it
+// (if it takes a context.Context), ctrl+d quits; other keys are ignored.
+func (p *Prompt) updateWhileRunning(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		if p.running != nil && !p.running.takesCtx {
+			return p, tea.Printf("%s can't be interrupted (its function doesn't take a context.Context); "+
+				"waiting for it to finish, ctrl+d quits", p.running.name)
+		}
+		if p.cancelRun != nil {
+			p.cancelRun()
+		}
+	case "ctrl+d":
+		if p.cancelRun != nil {
+			p.cancelRun()
+		}
+		p.exit = true
+		return p, tea.Quit
 	}
-	if m.withHelpMsg {
-		s += "\n" + HelpView()
+	return p, nil
+}
+
+// View implements tea.Model.
+func (p *Prompt) View() tea.View {
+	return tea.NewView(p.render())
+}
+
+// render builds the screen content.
+func (p *Prompt) render() string {
+	if p.runCmdMark || p.exit {
+		return p.prefix
+	}
+	p.updateSuggestions()
+	s := p.textInput.View()
+	if sv := p.suggestView(); sv != "" {
+		s += "\n" + sv
+	}
+	if p.helpLine {
+		s += "\n" + p.styles.HelpLine.Render(helpLineText)
 	}
 	return s
 }
 
-func (m *PromptModel) SuggestView() string {
-	suggestViews := []string{}
-	start, end := m.getSuggestScope()
-	forceSuggestIndex := -1
-	width := -1
-	for index := start; index < end; index++ {
-		if index == m.suggestIndex {
-			forceSuggestIndex = index - start
-		}
-		suggestView := getSuggestView(m.matchSuggests[index])
-		suggestViews = append(suggestViews, suggestView)
-		// display width (cells), so CJK suggestions are not over-padded
-		width = max(lipgloss.Width(suggestView), width)
+func (p *Prompt) suggestView() string {
+	start, end := p.getSuggestScope()
+	if start >= end {
+		return ""
 	}
-	m.forceStyle = m.forceStyle.Width(width)
-	m.baseStyle = m.baseStyle.Width(width)
-	for index, suggestView := range suggestViews {
-		if index == forceSuggestIndex {
-			suggestViews[index] = m.forceStyle.Render(suggestView)
-		} else {
-			suggestViews[index] = m.baseStyle.Render(suggestView)
-		}
+	textWidth := 0
+	for i := start; i < end; i++ {
+		textWidth = max(textWidth, lipgloss.Width(p.matchSuggests[i].Text))
 	}
-	return strings.Join(suggestViews, "\n")
-}
-
-func getSuggestView(s Suggest) string {
-	if s.SuggestType == SuggestOfHandler {
+	lines := make([]string, 0, end-start)
+	width := 0
+	for i := start; i < end; i++ {
+		s := p.matchSuggests[i]
+		line := s.Text
 		if s.Description != "" {
-			return fmt.Sprintf("%s: %s", s.Text, s.Description)
+			line += strings.Repeat(" ", textWidth-lipgloss.Width(s.Text)+2) + s.Description
 		}
-		return s.Text
+		lines = append(lines, line)
+		width = max(width, lipgloss.Width(line)) // cells, so CJK isn't over-padded
 	}
-	return fmt.Sprintf("%s, default: %v, description: %s", s.Text, s.Default, s.Description)
+	for i, line := range lines {
+		style := p.styles.Suggestion
+		if start+i == p.suggestIndex {
+			style = p.styles.Selected
+		}
+		lines[i] = style.Width(width).Render(line)
+	}
+	return strings.Join(lines, "\n")
 }
 
-func (m *Prompt) Run() error {
-	_, err := tea.NewProgram(m, m.programOptions...).Run()
-	// The bubbletea loop has stopped, so no more history entries will be sent.
-	// Close the channel and wait for the writer to drain any buffered entries
-	// before returning, so commands typed right before exit are not lost.
-	m.closeHistory()
-	return err
+// replaceScope replaces the word under (or just before) byte offset pos in
+// line with word and returns the new line and the byte offset just past the
+// inserted text. If pos is in the whitespace between words (or at a trailing
+// space), word is inserted there.
+func replaceScope(line, word string, pos int) (string, int) {
+	for _, t := range tokenize(line) {
+		if t.Start <= pos && pos <= t.End {
+			return line[:t.Start] + word + line[t.End:], t.Start + len(word)
+		}
+	}
+	return line[:pos] + word + line[pos:], pos + len(word)
 }
 
-// closeHistory closes the history channel and waits for the writer goroutine to
-// flush remaining entries. It is a no-op when history saving is disabled.
-func (m *PromptModel) closeHistory() {
-	if m.historyDone == nil {
+// effectiveSuggestNum caps the number of visible suggestions so the input
+// line, suggestions and help line fit the terminal height.
+func (p *Prompt) effectiveSuggestNum() int {
+	if p.termHeight <= 0 {
+		return p.maxSuggestions
+	}
+	avail := p.termHeight - 1 // input line
+	if p.helpLine {
+		avail--
+	}
+	return min(p.maxSuggestions, max(avail, 1))
+}
+
+// getSuggestScope returns the visible window [start, end) of matchSuggests,
+// keeping the selected suggestion in view.
+func (p *Prompt) getSuggestScope() (start, end int) {
+	n := p.effectiveSuggestNum()
+	start = max(p.suggestIndex, 0)
+	if start+n > len(p.matchSuggests)-1 {
+		start = max(len(p.matchSuggests)-n, 0)
+	}
+	return start, min(start+n, len(p.matchSuggests))
+}
+
+// updateSuggestions recomputes matchSuggests for the text before the cursor.
+func (p *Prompt) updateSuggestions() {
+	buf := p.historyBuffers[p.historyIndex]
+	pos := min(p.historyBufferPos, len(buf)) // defensive clamp
+	// leading spaces don't change which word is the command name
+	input := strings.TrimLeft(buf[:pos], " ")
+	if !p.suggestOnEmpty && input == "" {
+		p.matchSuggests = nil
 		return
 	}
-	close(m.historyChan)
-	<-m.historyDone
-	m.historyDone = nil
-}
-
-func replaceScope(cmdString, newString string, pos int) (string, int) {
-	subIndex := 0
-	for index := 0; index < pos; index++ {
-		if cmdString[index] == ' ' {
-			subIndex++
-		}
+	tokens := tokenize(input)
+	name := ""
+	if len(tokens) > 0 {
+		name = tokens[0].Text
 	}
-	cmds := strings.Split(cmdString, " ")
-	cmds[subIndex] = newString
-	newPos := 0
-	for index := 0; index < subIndex; index++ {
-		newPos += len(cmds[index]) + 1
+	// still typing the first word: no word yet, or one word reaching the cursor
+	typingName := len(tokens) == 0 || (len(tokens) == 1 && tokens[0].End == len(input))
+	c := p.lookup(name)
+	switch {
+	case c == nil || typingName:
+		p.matchSuggests = p.completeNames(name)
+	case c.completer != nil:
+		p.matchSuggests = sortSuggestions(c.completer(input))
+	case c.raw:
+		p.matchSuggests = nil // free-form arguments: nothing to suggest
+	default:
+		p.matchSuggests = c.completeFlags(input)
 	}
-	newPos += len(cmds[subIndex])
-	return strings.Join(cmds, " "), newPos
-}
-
-// effectiveSuggestNum caps the number of visible suggestions so the input line,
-// suggestions, and help line together fit within the terminal height. It returns
-// suggestNum unchanged until a WindowSizeMsg has reported the height.
-func (m *PromptModel) effectiveSuggestNum() int {
-	if m.termHeight <= 0 {
-		return m.suggestNum
-	}
-	avail := m.termHeight - 1 // input line
-	if m.withHelpMsg {
-		avail-- // help line
-	}
-	if avail < 1 {
-		// degenerate tiny terminal: still show one suggestion
-		avail = 1
-	}
-	return min(m.suggestNum, avail)
-}
-
-// getSuggestScope >= start; < end
-func (m *PromptModel) getSuggestScope() (start, end int) {
-	suggestNum := m.effectiveSuggestNum()
-	start = m.suggestIndex
-	for ; start < len(m.matchSuggests); start++ {
-		if start >= 0 && start < len(m.matchSuggests) {
-			break
-		}
-	}
-	if start+suggestNum > len(m.matchSuggests)-1 {
-		start = max(len(m.matchSuggests)-suggestNum, 0)
-	}
-
-	end = min(start+suggestNum, len(m.matchSuggests))
-	return
-}
-
-// SetHandlers replaces the whole handler set. It validates each handler like
-// registration does. Call it during setup, before Run: the bubbletea loop reads
-// the handler map without locking, so replacing it while the program is running
-// would race those reads.
-func (m *PromptModel) SetHandlers(handlers map[string]*HandlerInfo) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	// Validate and initialize each handler the same way registration does, so
-	// SetHandlers can't install handlers that would panic at run time.
-	for _, handlerInfo := range handlers {
-		if err := handlerInfo.CheckAndInitHandler(); err != nil {
-			panic(err)
-		}
-		if handlerInfo.Callback == nil {
-			handlerInfo.Callback = m.defaultCallback
-		}
-	}
-	m.handlerInfos = handlers
-}
-
-func (m *PromptModel) updateSuggentList() {
-	buf := m.historyBuffers[m.historyIndex]
-	// defensive clamp: never slice past the buffer even if position desyncs
-	pos := m.historyBufferPos
-	if pos > len(buf) {
-		pos = len(buf)
-	}
-	cmd := buf[:pos]
-	if m.ignoreEmptyCmd && cmd == "" {
-		m.matchSuggests = make([]Suggest, 0)
-		return
-	}
-	cmds := strings.Split(cmd, " ")
-	if len(cmds) == 0 {
-		cmds = append(cmds, "")
-	}
-	handler, ok := m.handlerInfos[cmds[0]]
-	if !ok || len(cmds) == 1 {
-		m.genHandlerSuggests(cmds[0])
-	} else if !handler.UseFlagSet {
-		// WithoutFlagSet handlers take a raw argument string, not flags, so
-		// offering "-flag" param completions for them is meaningless.
-		m.matchSuggests = make([]Suggest, 0)
-		m.suggestIndex = -1
-	} else {
-		var matchSuggests []Suggest
-		var err error
-		var getHandlerSuggests GetSuggestFunc = DefaultGetHandlerSuggests
-		if handler.GetSuggestMethod != nil {
-			getHandlerSuggests = handler.GetSuggestMethod
-		}
-		matchSuggests, err = getHandlerSuggests(handler, buf[:pos])
-		if err != nil || matchSuggests == nil {
-			m.matchSuggests = make([]Suggest, 0)
-			m.suggestIndex = -1
-			return
-		}
-		m.matchSuggests = matchSuggests
-	}
-
-	m.matchSuggests = SortSuggest(m.matchSuggests)
-}
-
-func (m *PromptModel) genHandlerSuggests(input string) {
-	m.matchSuggests = make([]Suggest, 0)
-	for handlerName, h := range m.handlerInfos {
-		if IsMatch(input, handlerName) {
-			m.matchSuggests = append(m.matchSuggests, Suggest{
-				Text:        handlerName,
-				SuggestType: SuggestOfHandler,
-				Description: h.HelpMsg,
-			})
-		}
+	if p.suggestIndex >= len(p.matchSuggests) {
+		p.suggestIndex = -1
 	}
 }
 
-type RunCmdMsg struct {
-	cmd string
-}
-
-func runCmd(cmd string) tea.Cmd {
-	return func() tea.Msg {
-		return RunCmdMsg{
-			cmd: cmd,
+// completeNames suggests command names matching input.
+func (p *Prompt) completeNames(input string) []Suggestion {
+	names := p.commandNames()
+	sort.Strings(names)
+	var out []Suggestion
+	for _, n := range names {
+		if isMatch(input, n) {
+			out = append(out, Suggestion{Text: n, Description: p.lookup(n).help})
 		}
 	}
+	return out
 }

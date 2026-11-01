@@ -4,12 +4,12 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func typeString(m tea.Model, s string) tea.Model {
 	for _, r := range s {
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = m.Update(textKey(string(r)))
 	}
 	return m
 }
@@ -30,21 +30,21 @@ func TestIsMatchUnicode(t *testing.T) {
 		{"", "anything", true},
 	}
 	for _, c := range cases {
-		if got := IsMatch(c.input, c.suggest); got != c.want {
-			t.Errorf("IsMatch(%q, %q) = %v, want %v", c.input, c.suggest, got, c.want)
+		if got := isMatch(c.input, c.suggest); got != c.want {
+			t.Errorf("isMatch(%q, %q) = %v, want %v", c.input, c.suggest, got, c.want)
 		}
 	}
 }
 
 // P3: typing a Chinese prefix must surface the matching handler suggestion.
 func TestChineseHandlerSuggestion(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory(), WithOutHelpMsg())
-	m.RegisterHandler(func(s string) {}, "查询状态", WithoutFlagSet())
-	m.RegisterHandler(func(s string) {}, "check", WithoutFlagSet())
+	m := New(WithoutHistory(), WithHelpLine(false))
+	m.RawCommand("查询状态", "", func(s string) {})
+	m.RawCommand("check", "", func(s string) {})
 
 	var mm tea.Model = m
 	mm = typeString(mm, "查")
-	v := mm.View()
+	v := mm.View().Content
 	if !strings.Contains(v, "查询状态") {
 		t.Fatalf("typing '查' should suggest '查询状态'; view:\n%s", v)
 	}
@@ -81,21 +81,21 @@ func TestPositionHelpers(t *testing.T) {
 
 // typeAndRender types s then calls View() (which populates matchSuggests via
 // updateSuggentList) so a subsequent Tab has candidates to work with.
-func typeAndRender(m *PromptModel, s string) {
+func typeAndRender(m *Prompt, s string) {
 	for _, r := range s {
-		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m.Update(textKey(string(r)))
 	}
-	m.View()
+	_ = m.View()
 }
 
-func press(m *PromptModel, k tea.KeyType) { m.Update(tea.KeyMsg{Type: k}) }
+func press(m *Prompt, k rune) { m.Update(key(k)) }
 
 // P3: tab must actually complete a multibyte handler name, and repeated tab
 // must cycle through all matches (regression guard for the buffer-anchor fix).
 func TestTabCompletionAndCyclingMultibyte(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory(), WithOutHelpMsg())
-	m.RegisterHandler(func(a string) {}, "查询历史", WithoutFlagSet())
-	m.RegisterHandler(func(a string) {}, "查询状态", WithoutFlagSet())
+	m := New(WithoutHistory(), WithHelpLine(false))
+	m.RawCommand("查询历史", "", func(a string) {})
+	m.RawCommand("查询状态", "", func(a string) {})
 
 	typeAndRender(m, "查询") // prefix matches both handlers
 	if len(m.matchSuggests) != 2 {
@@ -112,7 +112,7 @@ func TestTabCompletionAndCyclingMultibyte(t *testing.T) {
 			t.Fatalf("after tab %d, buffer should stay anchored to '查询', got %q",
 				i, m.historyBuffers[m.historyIndex])
 		}
-		m.View() // re-render as bubbletea would between key presses
+		_ = m.View() // re-render as bubbletea would between key presses
 		if len(m.matchSuggests) != 2 {
 			t.Fatalf("after tab %d, candidate list collapsed to %d (cycling broken)",
 				i, len(m.matchSuggests))
@@ -130,9 +130,8 @@ func TestTabCompletionAndCyclingMultibyte(t *testing.T) {
 
 // P3: ASCII tab cycling with param suggestions of a flag-set handler.
 func TestTabCyclingASCIIParams(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory(), WithOutHelpMsg())
-	m.RegisterHandler(func(apple, apricot, banana int) {}, "calc",
-		WithSuggests([]Suggest{{Text: "apple"}, {Text: "apricot"}, {Text: "banana"}}))
+	m := New(WithoutHistory(), WithHelpLine(false))
+	m.Command("calc", "", func(apple, apricot, banana int) {}, Flag("apple", ""), Flag("apricot", ""), Flag("banana", ""))
 
 	typeAndRender(m, "calc -a") // -a matches apple & apricot (subsequence), not banana
 	got := len(m.matchSuggests)
@@ -143,7 +142,7 @@ func TestTabCyclingASCIIParams(t *testing.T) {
 	for i := 0; i < got+1; i++ { // one extra to prove it cycles back
 		press(m, tea.KeyTab)
 		values[m.textInput.Value()] = true
-		m.View()
+		_ = m.View()
 		if len(m.matchSuggests) != got {
 			t.Fatalf("param candidate list collapsed from %d to %d after tab %d",
 				got, len(m.matchSuggests), i)
@@ -157,8 +156,8 @@ func TestTabCyclingASCIIParams(t *testing.T) {
 // P3: moving the cursor into the middle of a CJK line keeps historyBufferPos a
 // valid byte offset, and suggestions scope against the correct prefix.
 func TestMidLineCJKCursor(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory(), WithOutHelpMsg())
-	m.RegisterHandler(func(s string) {}, "查询", WithoutFlagSet())
+	m := New(WithoutHistory(), WithHelpLine(false))
+	m.RawCommand("查询", "", func(s string) {})
 
 	typeAndRender(m, "查询") // value "查询", cursor at end
 	if m.historyBufferPos != 6 {
@@ -168,7 +167,7 @@ func TestMidLineCJKCursor(t *testing.T) {
 	if m.historyBufferPos != 3 {
 		t.Fatalf("after KeyLeft, historyBufferPos = %d, want byte offset 3", m.historyBufferPos)
 	}
-	m.View() // updateSuggentList slices "查询"[:3] == "查" — must not panic
+	_ = m.View() // updateSuggentList slices "查询"[:3] == "查" — must not panic
 	if got := m.historyBuffers[m.historyIndex][:m.historyBufferPos]; got != "查" {
 		t.Fatalf("prefix slice = %q, want %q", got, "查")
 	}
@@ -177,8 +176,8 @@ func TestMidLineCJKCursor(t *testing.T) {
 // P3: backspace over a multibyte rune deletes the whole rune and keeps the
 // byte offset valid.
 func TestBackspaceOverMultibyte(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory(), WithOutHelpMsg())
-	m.RegisterHandler(func(s string) {}, "查询", WithoutFlagSet())
+	m := New(WithoutHistory(), WithHelpLine(false))
+	m.RawCommand("查询", "", func(s string) {})
 
 	typeAndRender(m, "查询")
 	press(m, tea.KeyBackspace) // remove 询
@@ -188,20 +187,19 @@ func TestBackspaceOverMultibyte(t *testing.T) {
 	if m.historyBufferPos != len("查") {
 		t.Fatalf("historyBufferPos = %d, want %d", m.historyBufferPos, len("查"))
 	}
-	m.View() // must not panic
+	_ = m.View() // must not panic
 }
 
 // P3: after typing Chinese then navigating history, no panic and suggestions
 // still recompute against a byte-correct slice.
 func TestChineseHistoryNavNoPanic(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory(), WithOutHelpMsg())
-	m.RegisterHandler(func(s string) {}, "打印", WithoutFlagSet())
+	m := New(WithoutHistory(), WithHelpLine(false))
+	m.RawCommand("打印", "", func(s string) {})
 
 	var mm tea.Model = m
 	mm = typeString(mm, "打印")
-	mm, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter}) // run + push history
-	// drain the RunCmdMsg
-	mm, _ = mm.Update(RunCmdMsg{cmd: "打印"})
-	mm, _ = mm.Update(tea.KeyMsg{Type: tea.KeyUp}) // navigate back into history
-	_ = mm.View()                                  // must not panic
+	mm, enterCmd := mm.Update(key(tea.KeyEnter)) // push history
+	mm = runAll(mm, enterCmd)                    // run the command to completion
+	mm, _ = mm.Update(key(tea.KeyUp))            // navigate back into history
+	_ = mm.View().Content                        // must not panic
 }

@@ -1,47 +1,45 @@
 package prompt
 
 import (
-	"math"
-	"reflect"
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
-// A large-magnitude negative float64 must be rejected for a float32 param,
-// symmetric with the positive-overflow check (no silent -Inf).
-func TestFloat32NegativeOverflowPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on negative float32 overflow")
+// Numbers are parsed at the parameter's own size: float32 overflow (either
+// sign) is an error rather than ±Inf, and the float32 range edges are fine.
+func TestFloat32Range(t *testing.T) {
+	var got float32
+	c := mustCommand(t, "f", func(x float32) { got = x }, Flag("x", ""))
+	for _, bad := range []string{"-1e100", "1e100"} {
+		if err := c.Run("f -x " + bad); err == nil || !strings.Contains(err.Error(), "out of range for float32") {
+			t.Errorf("-x %s: err = %v, want out of range", bad, err)
 		}
-	}()
-	float64ToFloatx(float64(-1e100), reflect.TypeOf(float32(0)))
-}
-
-func TestFloat32InRangeOK(t *testing.T) {
-	got := float64ToFloatx(float64(-1.5), reflect.TypeOf(float32(0)))
-	if got.(float32) != float32(-1.5) {
-		t.Fatalf("got %v, want -1.5", got)
 	}
-	// boundary values must not overflow
-	_ = float64ToFloatx(float64(math.MaxFloat32), reflect.TypeOf(float32(0)))
-	_ = float64ToFloatx(float64(-math.MaxFloat32), reflect.TypeOf(float32(0)))
+	for _, ok := range []string{"-1.5", "3.4028234663852886e38", "-3.4028234663852886e38"} {
+		if err := c.Run("f -x " + ok); err != nil {
+			t.Errorf("-x %s: %v", ok, err)
+		}
+	}
+	if err := c.Run("f -x -1.5"); err != nil || got != -1.5 {
+		t.Fatalf("got %v, %v", got, err)
+	}
 }
 
 // With a small terminal height, the rendered view must not exceed it even when
 // suggestNum is large (input line must stay visible).
 func TestSuggestionsClampedToTerminalHeight(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory(), WithSuggestNum(20))
+	m := New(WithoutHistory(), WithMaxSuggestions(20))
 	for i, name := range []string{"aa", "ab", "ac", "ad", "ae", "af", "ag", "ah"} {
 		_ = i
-		m.RegisterHandler(func(s string) {}, name, WithoutFlagSet())
+		m.RawCommand(name, "", func(s string) {})
 	}
 	var mm tea.Model = m
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 80, Height: 5})
 	mm = typeString(mm, "a") // matches all handlers
-	v := mm.View()
+	v := mm.View().Content
 	lines := strings.Count(v, "\n") + 1
 	if lines > 5 {
 		t.Fatalf("view has %d lines, exceeds terminal height 5:\n%s", lines, v)
@@ -49,8 +47,8 @@ func TestSuggestionsClampedToTerminalHeight(t *testing.T) {
 }
 
 func TestEffectiveSuggestNum(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory(), WithSuggestNum(10))
-	m.withHelpMsg = true
+	m := New(WithoutHistory(), WithMaxSuggestions(10))
+	m.helpLine = true
 	m.termHeight = 0
 	if got := m.effectiveSuggestNum(); got != 10 {
 		t.Fatalf("no height known: got %d, want 10 (unchanged)", got)
@@ -59,7 +57,7 @@ func TestEffectiveSuggestNum(t *testing.T) {
 	if got := m.effectiveSuggestNum(); got != 3 {
 		t.Fatalf("height 5 with help: got %d, want 3", got)
 	}
-	m.withHelpMsg = false
+	m.helpLine = false
 	m.termHeight = 5 // 5 - 1 input = 4
 	if got := m.effectiveSuggestNum(); got != 4 {
 		t.Fatalf("height 5 no help: got %d, want 4", got)
@@ -97,30 +95,27 @@ func TestCompleteUTF8Len(t *testing.T) {
 	}
 }
 
-// IsBoolSuggest must recognize a bool flag whether or not '=' is present.
-func TestIsBoolSuggestValuelessFlag(t *testing.T) {
-	suggests := []Suggest{{Text: "verbose", Default: false}, {Text: "name", Default: ""}}
-	if !IsBoolSuggest(suggests, "-verbose", "-") {
-		t.Error("value-less -verbose should be recognized as bool")
-	}
-	if !IsBoolSuggest(suggests, "-verbose=true", "-") {
-		t.Error("-verbose=true should be recognized as bool")
-	}
-	if IsBoolSuggest(suggests, "-name", "-") {
-		t.Error("string flag -name should not be bool")
-	}
-	if IsBoolSuggest(suggests, "name", "-") {
-		t.Error("a token without the prefix should return false")
-	}
-}
-
 // Help text no longer contains the old "choise" typo.
 func TestHelpTextSpelling(t *testing.T) {
-	v := HelpView()
+	v := helpLineText
 	if strings.Contains(v, "choise") {
 		t.Fatalf("help text still contains typo 'choise': %q", v)
 	}
-	if !strings.Contains(v, "choose") {
-		t.Fatalf("help text should say 'choose': %q", v)
+	if !strings.Contains(v, "complete") {
+		t.Fatalf("help text should mention completion: %q", v)
+	}
+}
+
+// lipgloss v2 only parses #RGB/#RRGGBB; an 8-digit #RRGGBBAA silently becomes
+// "no color". Guard the default suggestion styles against that regression.
+func TestDefaultStyleColorsParse(t *testing.T) {
+	ds := DefaultStyles()
+	for name, st := range map[string]lipgloss.Style{"suggestion": ds.Suggestion, "selected": ds.Selected} {
+		if _, ok := st.GetBackground().(lipgloss.NoColor); ok {
+			t.Errorf("%s style background did not parse", name)
+		}
+		if _, ok := st.GetForeground().(lipgloss.NoColor); ok {
+			t.Errorf("%s style foreground did not parse", name)
+		}
 	}
 }
