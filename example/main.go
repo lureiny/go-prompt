@@ -1,84 +1,71 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"reflect"
+	"time"
 
 	"github.com/lureiny/go-prompt"
 )
 
+// GreetArgs shows struct-based flags: names, help and defaults come from
+// field tags (the name defaults to the field name in kebab-case).
+type GreetArgs struct {
+	People string `help:"who to greet" default:"world"`
+	Times  int    `flag:"n" help:"how many times" default:"1"`
+	Shout  bool   `help:"use upper case"`
+}
+
 func main() {
-	m := prompt.NewPrompt(
-		prompt.WithPromptPrefixOption(">>> "),
-		prompt.WithSuggestNum(4),
-		prompt.WithOutFile("out.log"),
-		prompt.WithHelpMsg(),
+	p := prompt.New(
+		prompt.WithPrefix(">>> "),
+		prompt.WithMaxSuggestions(4),
+		prompt.WithLogFile("out.log"),
+		prompt.WithAppName("go-prompt-example"), // history: ~/.config/go-prompt-example/history
 	)
-	m.RegisterHandler(hello, "hello",
-		prompt.WithoutFlagSet(),
-		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "people", Default: "world", Description: "say hello"},
-		}),
-		prompt.WithHandlerHelpMsg("say hello to someone"),
-	)
-	m.RegisterHandler(hello2, "hello2",
-		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "people", Default: "world", Description: "say hello"},
-		}))
-	m.RegisterHandler(hello1, "hello1",
-		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "people", Default: "world", Description: "say hello"},
-		}))
-	m.RegisterHandler(calc, "calc",
-		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "a", Default: int16(10000), Description: "a"},
-			{Text: "b", Description: "b"},
-		}))
-	m.RegisterHandler(boolTest, "boolTest",
-		prompt.WithSuggests([]prompt.Suggest{
-			{Text: "b", Description: "b"},
-			{Text: "name", Description: "every thing", Default: "bool"},
-			{Text: "c", Description: "every thing", Default: true},
-			{Text: "d", Description: "every thing", Default: true},
-		}))
 
-	m.RegisterHandler(prompt.DefaultExitFunc, "exit", prompt.WithExitAfterRun(true))
+	// greet -people "张 三" -n 2 -shout
+	p.Command("greet", "say hello to someone", greet)
 
-	if err := m.Run(); err != nil {
-		panic(err)
+	// Plain parameters: one prompt.Flag per parameter, in order.
+	// calc -a 1 -b 2 prints the returned value: 3
+	p.Command("calc", "add two numbers", func(a, b int16) int16 { return a + b },
+		prompt.Flag("a", "first number").Default(10000),
+		prompt.Flag("b", "second number"))
+
+	// A leading context.Context makes the command interruptible with ctrl+c.
+	p.Command("sleep", "sleep for a while (ctrl+c interrupts)", sleep,
+		prompt.Flag("for", "how long").Default("5s"))
+
+	// RawCommand gets the rest of the line as-is.
+	p.RawCommand("echo", "print the arguments unchanged", func(args string) {
+		fmt.Println(args)
+	})
+
+	// "help", "help <command>", "<command> -h" and "exit" are built in.
+	if err := p.Run(); err != nil {
+		fmt.Println("error:", err)
 	}
 }
 
-func hello(people string) string {
-	fmt.Println("hello", people)
-	return "just say hello " + people
-}
-
-func helloCallback(results []reflect.Value) {
-	if len(results) == 0 {
-		return
+func greet(args GreetArgs) {
+	msg := fmt.Sprintf("hello %s", args.People)
+	if args.Shout {
+		msg = fmt.Sprintf("HELLO %s!", args.People)
 	}
-	for _, r := range results {
-		if r.Kind() == reflect.String {
-			fmt.Println(r.String())
-		}
+	for i := 0; i < args.Times; i++ {
+		fmt.Println(msg)
 	}
-
 }
 
-func hello1(people string) {
-	fmt.Println("hello1", people)
-}
-
-func hello2(people string) {
-	fmt.Println("hello2", people)
-}
-
-func calc(a, b int16) string {
-	fmt.Printf("a + b = %d + %d = %d\n", a, b, a+b)
-	return "just calc " + fmt.Sprintf("a + b = %d + %d = %d", a, b, a+b)
-}
-
-func boolTest(b bool, name string, c, d bool) {
-	fmt.Println(b, name, c, d)
+// sleep returns ctx.Err() when interrupted; a returned error is shown as a
+// failure (context.Canceled as "interrupted").
+func sleep(ctx context.Context, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		fmt.Println("slept", d)
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

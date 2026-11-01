@@ -8,14 +8,14 @@ import (
 	"time"
 )
 
-// SortSuggest must preserve every element even when two share the same Text.
-func TestSortSuggestKeepsDuplicateText(t *testing.T) {
-	in := []Suggest{
+// sortSuggestions must preserve every element even when two share the same Text.
+func TestSortSuggestionsKeepsDuplicateText(t *testing.T) {
+	in := []Suggestion{
 		{Text: "b", Description: "first"},
 		{Text: "a", Description: "second"},
 		{Text: "a", Description: "third"},
 	}
-	out := SortSuggest(in)
+	out := sortSuggestions(in)
 	if len(out) != 3 {
 		t.Fatalf("got %d suggests, want 3 (none dropped)", len(out))
 	}
@@ -33,7 +33,7 @@ func TestSortSuggestKeepsDuplicateText(t *testing.T) {
 func TestHistoryFlushOnClose(t *testing.T) {
 	dir := t.TempDir()
 	hist := filepath.Join(dir, "cmd.history")
-	m := NewPromptModel(WithHistoryFile(hist))
+	m := startedPrompt(t, WithHistoryFile(hist))
 
 	for i := 0; i < 250 && !m.readyToSaveHistory.Load(); i++ {
 		time.Sleep(2 * time.Millisecond)
@@ -55,31 +55,27 @@ func TestHistoryFlushOnClose(t *testing.T) {
 	}
 }
 
-// An invalid Suggest.Text must yield a clean registration error, not a panic
+// An invalid flag name must yield a clean registration error, not a panic
 // from inside the flag package.
-func TestInvalidSuggestTextIsError(t *testing.T) {
+func TestInvalidFlagNameIsError(t *testing.T) {
 	for _, bad := range []string{"-x", "a=b", "a b", ""} {
-		h := NewHandlerInfo("h", func(s string) {}, WithSuggests([]Suggest{{Text: bad}}))
-		if err := h.CheckAndInitHandler(); err == nil {
-			t.Errorf("Suggest.Text %q should be rejected", bad)
+		_, err := testCommand("h", "", func(s string) {}, false, Flag(bad, ""))
+		if err == nil {
+			t.Errorf("flag name %q should be rejected", bad)
 		}
 	}
-	h := NewHandlerInfo("h", func(s string) {}, WithSuggests([]Suggest{{Text: "ok"}}))
-	if err := h.CheckAndInitHandler(); err != nil {
-		t.Errorf("valid Suggest.Text rejected: %v", err)
+	if _, err := testCommand("h", "", func(s string) {}, false, Flag("ok", "")); err != nil {
+		t.Errorf("valid flag name rejected: %v", err)
 	}
 }
 
-// A struct-literal HandlerInfo with a nil func must return an error, not panic.
-func TestCheckAndInitHandlerNilFunc(t *testing.T) {
-	h := &HandlerInfo{Name: "bad"} // Handler and HandlerReflectType are nil
-	if err := h.CheckAndInitHandler(); err == nil {
-		t.Fatal("expected error for nil handler func")
-	}
-	// literal with a valid func but no reflect type should recover and pass
-	h2 := &HandlerInfo{Name: "ok", Handler: func(s string) {}, UseFlagSet: false}
-	if err := h2.CheckAndInitHandler(); err != nil {
-		t.Fatalf("literal handler with valid func should pass, got: %v", err)
+// A nil or non-func command function is a registration error, not a panic
+// later at run time.
+func TestNilOrNonFuncCommandIsError(t *testing.T) {
+	for _, fn := range []any{nil, 42, "f", (func())(nil)} {
+		if _, err := testCommand("bad", "", fn, false); err == nil {
+			t.Errorf("fn %#v should be rejected", fn)
+		}
 	}
 }
 
@@ -88,7 +84,7 @@ func TestHistoryRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	hist := filepath.Join(dir, "rt.history")
 
-	m1 := NewPromptModel(WithHistoryFile(hist))
+	m1 := startedPrompt(t, WithHistoryFile(hist))
 	for i := 0; i < 250 && !m1.readyToSaveHistory.Load(); i++ {
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -96,7 +92,7 @@ func TestHistoryRoundTrip(t *testing.T) {
 	m1.closeHistory()
 
 	// A fresh model (saving disabled so it doesn't spawn a writer) still loads.
-	m2 := NewPromptModel(WithHistoryFile(hist), WithOutSaveHistory())
+	m2 := startedPrompt(t, WithHistoryFile(hist))
 	found := false
 	for _, h := range m2.historys {
 		if h == "mycmd arg" {
@@ -110,30 +106,30 @@ func TestHistoryRoundTrip(t *testing.T) {
 
 // closeHistory on a history-disabled model is a safe no-op, and idempotent.
 func TestCloseHistoryDisabledNoop(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory())
+	m := New(WithoutHistory())
 	m.closeHistory() // historyDone is nil -> must not panic or block
 	m.closeHistory() // double call also safe
 }
 
-// A WithoutFlagSet handler must not be offered flag-style param completions.
-func TestWithoutFlagSetNoParamSuggestions(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory(), WithOutHelpMsg())
-	m.RegisterHandler(func(s string) {}, "hello", WithoutFlagSet(),
-		WithSuggests([]Suggest{{Text: "people", Default: "world"}}))
+// A RawCommand must not be offered flag-style param completions.
+func TestRawCommandNoFlagSuggestions(t *testing.T) {
+	m := New(WithoutHistory(), WithHelpLine(false))
+	m.RawCommand("hello", "", func(s string) {})
 
 	typeAndRender(m, "hello ") // trailing space -> param position
 	if len(m.matchSuggests) != 0 {
-		t.Fatalf("WithoutFlagSet handler should offer no param suggestions, got %+v", m.matchSuggests)
+		t.Fatalf("RawCommand should offer no flag suggestions, got %+v", m.matchSuggests)
 	}
 }
 
-// SetHandlers must validate handlers instead of installing broken ones.
-func TestSetHandlersPanicsOnInvalid(t *testing.T) {
-	m := NewPromptModel(WithOutSaveHistory())
+// Registering the same command name twice is a setup error and panics.
+func TestDuplicateCommandPanics(t *testing.T) {
+	m := New(WithoutHistory())
+	m.Command("a", "", func() {})
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("SetHandlers should panic on an invalid handler")
+			t.Fatal("registering a duplicate command should panic")
 		}
 	}()
-	m.SetHandlers(map[string]*HandlerInfo{"bad": {Name: "bad"}})
+	m.Command("a", "", func() {})
 }

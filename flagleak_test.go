@@ -5,9 +5,8 @@ import "testing"
 // P2: after a failed parse, defaults must be restored on the next run — no leak.
 func TestFlagValuesDoNotLeakAfterParseError(t *testing.T) {
 	var gotA, gotB int
-	h := NewHandlerInfo("calc", func(a, b int) { gotA, gotB = a, b },
-		WithSuggests([]Suggest{{Text: "a", Default: 10}, {Text: "b", Default: 20}}))
-	if err := h.CheckAndInitHandler(); err != nil {
+	h, hErr := testCommand("calc", "", func(a, b int) { gotA, gotB = a, b }, false, Flag("a", "").Default(10), Flag("b", "").Default(20))
+	if err := hErr; err != nil {
 		t.Fatalf("check: %v", err)
 	}
 
@@ -28,9 +27,8 @@ func TestFlagValuesDoNotLeakAfterParseError(t *testing.T) {
 // P2: after a run that sets values explicitly, the next default run resets them.
 func TestFlagValuesResetBetweenRuns(t *testing.T) {
 	var gotA int
-	h := NewHandlerInfo("calc", func(a, b int) { gotA = a },
-		WithSuggests([]Suggest{{Text: "a", Default: 1}, {Text: "b", Default: 2}}))
-	if err := h.CheckAndInitHandler(); err != nil {
+	h, hErr := testCommand("calc", "", func(a, b int) { gotA = a }, false, Flag("a", "").Default(1), Flag("b", "").Default(2))
+	if err := hErr; err != nil {
 		t.Fatalf("check: %v", err)
 	}
 	if err := h.Run("calc -a=777 -b=0"); err != nil {
